@@ -1,0 +1,13 @@
+[project]
+name = "jump-admin-tui"
+version = "0.1.0"
+description = "Admin TUI for jump-backend (Cloudflare Access service token)"
+requires-python = ">=3.10"
+dependencies = [
+  "textual>=0.60.0",
+  "requests>=2.31.0",
+]
+
+[project.scripts]
+jump-admin-tui = "jump_admin_tui.app:run"
+

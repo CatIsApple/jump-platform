@@ -1,0 +1,20 @@
+[project]
+name = "jump-worker-dashboard"
+version = "0.2.0"
+description = "Worker dashboard (no login, no excel)"
+requires-python = ">=3.10"
+dependencies = [
+  "customtkinter>=5.2.0",
+  "requests>=2.31.0",
+  "selenium>=4.20.0",
+  "beautifulsoup4>=4.12.0",
+  "brotli>=1.1.0",
+]
+
+[project.optional-dependencies]
+build = [
+  "pyinstaller>=6.10.0",
+]
+
+[project.gui-scripts]
+jump-worker-dashboard = "jump_worker_dashboard.app.gui:main"

@@ -1,0 +1,19 @@
+{
+  "name": "jump-backend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --remote",
+    "deploy": "wrangler deploy",
+    "d1:migrate": "wrangler d1 migrations apply jump_backend_db --remote",
+    "d1:migrate:local": "wrangler d1 migrations apply jump_backend_db",
+    "smoke": "python3 scripts/prod_smoke.py",
+    "sync:domains": "python3 scripts/sync_domains_from_json.py"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.0.0",
+    "typescript": "^5.0.0",
+    "wrangler": "^4.50.0"
+  }
+}

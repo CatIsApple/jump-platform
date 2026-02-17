@@ -1,0 +1,22 @@
+name = "jump-backend"
+main = "src/index.ts"
+compatibility_date = "2026-02-15"
+
+# 커스텀 도메인 라우팅은 아래를 채운 뒤 배포하세요.
+routes = [
+  { pattern = "api.guardian01.online/*", zone_name = "guardian01.online" }
+]
+
+[vars]
+ENV = "production"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "jump_backend_db"
+database_id = "ae50d38a-4435-42f7-8d55-05159dc1397f"
+
+# (선택) 관리자 API 이중 보호용 토큰. Cloudflare Access를 쓰더라도 실수 방지 차원에서 권장.
+# ADMIN_TOKEN = "set-in-dashboard-or-wrangler-secret"
+#
+# (필수) 라이센스 키/세션 토큰 해싱용 Pepper(서버 비밀값). 반드시 Secret로 넣으세요.
+# LICENSE_PEPPER = "set-in-dashboard-or-wrangler-secret"
