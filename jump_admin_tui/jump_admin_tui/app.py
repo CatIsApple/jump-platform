@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import replace
 from datetime import datetime
 from typing import Any
@@ -474,4 +475,9 @@ class JumpAdminTui(App):
 
 
 def run() -> None:
-    JumpAdminTui().run()
+    # Some shells/exporters set NO_COLOR=1 globally, which can make Textual
+    # screens appear blank in certain terminals. Force-enable normal rendering.
+    os.environ.pop("NO_COLOR", None)
+
+    inline = os.environ.get("JUMP_TUI_INLINE", "").strip() in {"1", "true", "TRUE", "yes", "YES"}
+    JumpAdminTui().run(inline=inline)
