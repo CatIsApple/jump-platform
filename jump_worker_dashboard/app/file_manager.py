@@ -23,7 +23,7 @@ def data_dir() -> Path:
     env_path = os.environ.get("JUMP_WORKER_DATA_DIR", "").strip()
     if env_path:
         d = Path(env_path).expanduser().resolve()
-    elif getattr(sys, "frozen", False):
+    elif getattr(sys, "frozen", False) or "__compiled__" in globals():
         d = Path.home() / "jump_worker_dashboard" / "data"
     else:
         base = Path(__file__).resolve().parents[1]

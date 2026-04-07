@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import logging
 import threading
+import traceback
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class BrowserManager:
@@ -60,7 +64,8 @@ class BrowserManager:
                     driver.uc_gui_click_captcha()
                 except Exception:
                     pass
-            except Exception:
+            except Exception as sb_exc:
+                logger.debug("seleniumbase 사용 불가: %s", sb_exc)
                 driver = None
 
             # 2) Selenium fallback: 설치만으로 동작해야 하므로 기본 드라이버 사용
@@ -69,8 +74,10 @@ class BrowserManager:
                     from selenium import webdriver  # type: ignore
                     from selenium.webdriver.chrome.options import Options  # type: ignore
                 except Exception as exc:  # noqa: BLE001
+                    logger.error("selenium import 실패:\n%s", traceback.format_exc())
                     raise RuntimeError(
                         "브라우저 드라이버를 만들 수 없습니다. selenium 또는 seleniumbase 설치를 확인하세요."
+                        f"\n원인: {exc}"
                     ) from exc
 
                 options = Options()
@@ -82,7 +89,13 @@ class BrowserManager:
                 if self.headless:
                     options.add_argument("--headless=new")
 
-                driver = webdriver.Chrome(options=options)
+                try:
+                    driver = webdriver.Chrome(options=options)
+                except Exception as drv_exc:
+                    logger.error("Chrome 드라이버 생성 실패:\n%s", traceback.format_exc())
+                    raise RuntimeError(
+                        f"Chrome 브라우저를 시작할 수 없습니다: {drv_exc}"
+                    ) from drv_exc
 
                 try:
                     driver.set_window_size(1920, 1080)

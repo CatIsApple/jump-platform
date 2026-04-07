@@ -20,9 +20,11 @@ from .log_bus import LogBus
 from .models import Workflow
 from .platform_domains import (
     ensure_platform_domains,
+    is_platform_enabled,
+    load_platform_domains_full,
     platform_domains_path,
     resolve_platform_domain,
-    save_platform_domains,
+    save_platform_domains_full,
 )
 from .sites import BROWSER_REQUIRED_SITES, SITE_KEYS
 
@@ -105,6 +107,8 @@ LEVEL_KOR = {
     "ERROR": "오류",
 }
 
+HARDCODED_BACKEND_URL = "https://api.guardian01.online"
+HARDCODED_CAPTCHA_API_KEY = "0d832bea4650d16a3cd7fa6bcb70a06e"
 SETTING_BACKEND_BASE_URL = "backend_base_url"
 SETTING_BACKEND_LICENSE_KEY = "backend_license_key"
 SETTING_BACKEND_DEVICE_ID = "backend_device_id"
@@ -119,8 +123,15 @@ SETTING_BACKEND_STATUS = "backend_status"
 # ---------------------------
 
 def _resource_base() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys._MEIPASS)  # type: ignore[attr-defined]
+    # PyInstaller: _MEIPASS points to the temp extraction directory
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(meipass)
+    # Nuitka (standalone/onefile): assets are next to the executable
+    exe_dir = Path(sys.executable).resolve().parent
+    if (exe_dir / "assets").is_dir():
+        return exe_dir
+    # Source / development mode
     return Path(__file__).resolve().parents[1]
 
 
@@ -348,12 +359,157 @@ class ConfirmDialog(ctk.CTkToplevel):
         return bool(self._result)
 
 
+class LicenseGateDialog(ctk.CTkToplevel):
+    def __init__(self, parent: "WorkerDashboardApp") -> None:
+        super().__init__(parent)
+        self.app = parent
+        self._result = False
+
+        self.title("라이센스 로그인")
+        self.geometry("500x300")
+        self.resizable(False, False)
+        self.configure(fg_color=COLORS["bg"])
+
+        if parent.state() != "withdrawn":
+            self.transient(parent)
+        self.grab_set()
+        self.lift()
+
+        card = ctk.CTkFrame(
+            self,
+            fg_color=COLORS["card"],
+            border_color=COLORS["border_soft"],
+            border_width=1,
+            corner_radius=STYLES["card_radius"],
+        )
+        card.pack(fill="both", expand=True, padx=SP["xl"], pady=SP["xl"])
+        card.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            card,
+            text="라이센스 로그인",
+            font=_font(17, "bold"),
+            text_color=COLORS["text"],
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=SP["2xl"], pady=(SP["2xl"], SP["sm"]))
+
+        ctk.CTkLabel(
+            card,
+            text="라이센스 키",
+            font=_font(14),
+            text_color=COLORS["text_2"],
+        ).grid(row=1, column=0, sticky="w", padx=SP["2xl"], pady=SP["sm"])
+
+        self.entry_license_key = self.app._make_entry(card, placeholder_text="JUMP-...")
+        self.entry_license_key.grid(row=1, column=1, sticky="ew", padx=(0, SP["2xl"]), pady=SP["sm"])
+        saved_key = self.app.db.get_setting(SETTING_BACKEND_LICENSE_KEY, "")
+        if saved_key:
+            self.entry_license_key.insert(0, saved_key)
+
+        self.lbl_hint = ctk.CTkLabel(
+            card,
+            text="앱 사용 전 라이센스 인증이 필요합니다.",
+            font=_font(13),
+            text_color=COLORS["text_3"],
+            anchor="w",
+        )
+        self.lbl_hint.grid(row=2, column=0, columnspan=2, sticky="w", padx=SP["2xl"], pady=(SP["md"], SP["xs"]))
+
+        self.lbl_status = ctk.CTkLabel(
+            card,
+            text="",
+            font=_font(13),
+            text_color=COLORS["error"],
+            anchor="w",
+            wraplength=470,
+            justify="left",
+        )
+        self.lbl_status.grid(row=3, column=0, columnspan=2, sticky="w", padx=SP["2xl"], pady=(0, SP["sm"]))
+
+        btn_row = ctk.CTkFrame(card, fg_color="transparent")
+        btn_row.grid(row=4, column=0, columnspan=2, sticky="ew", padx=SP["2xl"], pady=(SP["md"], SP["2xl"]))
+
+        ctk.CTkButton(
+            btn_row,
+            text="종료",
+            height=STYLES["button_height"],
+            fg_color=COLORS["input"],
+            hover_color=COLORS["card_hover"],
+            border_width=1,
+            border_color=COLORS["border"],
+            corner_radius=STYLES["button_radius"],
+            font=_font(13),
+            command=self._on_cancel,
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            btn_row,
+            text="로그인",
+            height=STYLES["button_height"],
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_hover"],
+            corner_radius=STYLES["button_radius"],
+            font=_font(13, "bold"),
+            command=self._on_login,
+        ).pack(side="right")
+
+        self.bind("<Return>", self._on_return)
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+        self.after(100, self._focus_default_entry)
+
+    def _focus_default_entry(self) -> None:
+        try:
+            self.entry_license_key.focus_set()
+        except Exception:
+            pass
+
+    def _save_fields(self) -> None:
+        prev_key = self.app.db.get_setting(SETTING_BACKEND_LICENSE_KEY, "").strip()
+        new_key = self.entry_license_key.get().strip()
+
+        self.app.db.set_setting(SETTING_BACKEND_BASE_URL, HARDCODED_BACKEND_URL)
+        self.app.db.set_setting(SETTING_BACKEND_LICENSE_KEY, new_key)
+        if not self.app.db.get_setting(SETTING_BACKEND_DEVICE_ID, "").strip():
+            self.app.db.set_setting(SETTING_BACKEND_DEVICE_ID, self.app._default_device_id())
+
+        if new_key != prev_key:
+            self.app._clear_backend_session()
+
+    def _on_return(self, _event: object = None) -> None:
+        self._on_login()
+
+    def _on_login(self) -> None:
+        self._save_fields()
+        self.lbl_status.configure(text="", text_color=COLORS["error"])
+        self.update_idletasks()
+
+        ok, msg = self.app._backend_login(notify=False)
+        if not ok:
+            self.app._refresh_license_status_label()
+            self.lbl_status.configure(text=msg or "라이센스 로그인 실패")
+            return
+
+        ok_sync, msg_sync = self.app._sync_platform_domains_from_backend(notify=False)
+        if not ok_sync:
+            self.app.log_bus.emit(msg_sync, "WARNING")
+
+        self.app._refresh_license_status_label()
+        self._result = True
+        self.destroy()
+
+    def _on_cancel(self) -> None:
+        self._result = False
+        self.destroy()
+
+    def result(self) -> bool:
+        return self._result
+
+
 class SettingsDialog(ctk.CTkToplevel):
     def __init__(self, parent: "WorkerDashboardApp") -> None:
         super().__init__(parent)
         self.app = parent
         self.title("설정")
-        self.geometry("620x680")
+        self.geometry("620x420")
         self.resizable(False, False)
         self.configure(fg_color=COLORS["bg"])
 
@@ -417,138 +573,9 @@ class SettingsDialog(ctk.CTkToplevel):
             corner_radius=6,
         ).grid(row=3, column=0, columnspan=2, sticky="w", padx=SP["2xl"], pady=(0, SP["md"]))
 
-        # 2Captcha API Key
-        ctk.CTkLabel(
-            card,
-            text="2Captcha API 키",
-            font=_font(14),
-            text_color=COLORS["text_2"],
-        ).grid(row=4, column=0, sticky="w", padx=SP["2xl"], pady=SP["sm"])
-
-        self.entry_captcha_key = self.app._make_entry(card, placeholder_text="API 키 입력 (자동 캔차 해제)")
-        self.entry_captcha_key.grid(row=4, column=1, sticky="ew", padx=(0, SP["2xl"]), pady=SP["sm"])
-        saved_key = self.app.db.get_setting("captcha_api_key", "")
-        if saved_key:
-            self.entry_captcha_key.insert(0, saved_key)
-
-        # Backend settings
-        divider = ctk.CTkFrame(card, height=1, fg_color=COLORS["border_soft"])
-        divider.grid(row=5, column=0, columnspan=2, sticky="ew", padx=SP["2xl"], pady=(SP["md"], SP["sm"]))
-
-        ctk.CTkLabel(
-            card,
-            text="백엔드 연동",
-            font=_font(14, "bold"),
-            text_color=COLORS["text"],
-        ).grid(row=6, column=0, columnspan=2, sticky="w", padx=SP["2xl"], pady=(SP["sm"], SP["xs"]))
-
-        ctk.CTkLabel(
-            card,
-            text="백엔드 URL",
-            font=_font(14),
-            text_color=COLORS["text_2"],
-        ).grid(row=7, column=0, sticky="w", padx=SP["2xl"], pady=SP["sm"])
-
-        self.entry_backend_url = self.app._make_entry(card, placeholder_text="예: https://api.guardian01.online")
-        self.entry_backend_url.grid(row=7, column=1, sticky="ew", padx=(0, SP["2xl"]), pady=SP["sm"])
-        saved_url = self.app.db.get_setting(SETTING_BACKEND_BASE_URL, "")
-        if saved_url:
-            self.entry_backend_url.insert(0, saved_url)
-
-        ctk.CTkLabel(
-            card,
-            text="라이센스 키",
-            font=_font(14),
-            text_color=COLORS["text_2"],
-        ).grid(row=8, column=0, sticky="w", padx=SP["2xl"], pady=SP["sm"])
-
-        self.entry_license_key = self.app._make_entry(card, placeholder_text="JUMP-...")
-        self.entry_license_key.grid(row=8, column=1, sticky="ew", padx=(0, SP["2xl"]), pady=SP["sm"])
-        saved_license_key = self.app.db.get_setting(SETTING_BACKEND_LICENSE_KEY, "")
-        if saved_license_key:
-            self.entry_license_key.insert(0, saved_license_key)
-
-        ctk.CTkLabel(
-            card,
-            text="디바이스 ID",
-            font=_font(14),
-            text_color=COLORS["text_2"],
-        ).grid(row=9, column=0, sticky="w", padx=SP["2xl"], pady=SP["sm"])
-
-        self.entry_device_id = self.app._make_entry(card, placeholder_text="자동 생성됨")
-        self.entry_device_id.grid(row=9, column=1, sticky="ew", padx=(0, SP["2xl"]), pady=SP["sm"])
-        saved_device = self.app.db.get_setting(SETTING_BACKEND_DEVICE_ID, "")
-        if saved_device:
-            self.entry_device_id.insert(0, saved_device)
-        else:
-            self.entry_device_id.insert(0, self.app._default_device_id())
-
-        self.lbl_backend_status = ctk.CTkLabel(
-            card,
-            text="라이센스: 미로그인",
-            font=_font(13),
-            text_color=COLORS["text_4"],
-            anchor="w",
-        )
-        self.lbl_backend_status.grid(row=10, column=0, columnspan=2, sticky="w", padx=SP["2xl"], pady=(SP["sm"], 0))
-
-        self.lbl_backend_expires = ctk.CTkLabel(
-            card,
-            text="만료: -",
-            font=_font(12),
-            text_color=COLORS["text_3"],
-            anchor="w",
-        )
-        self.lbl_backend_expires.grid(row=11, column=0, columnspan=2, sticky="w", padx=SP["2xl"], pady=(SP["xs"], SP["sm"]))
-
-        backend_btn_row = ctk.CTkFrame(card, fg_color="transparent")
-        backend_btn_row.grid(row=12, column=0, columnspan=2, sticky="ew", padx=SP["2xl"], pady=(0, SP["md"]))
-
-        ctk.CTkButton(
-            backend_btn_row,
-            text="라이센스 로그인",
-            height=STYLES["button_height_sm"],
-            fg_color=COLORS["accent_soft"],
-            hover_color=COLORS["accent_muted"],
-            corner_radius=STYLES["button_radius"],
-            font=_font(13),
-            text_color="#93c5fd",
-            command=self._on_backend_login,
-        ).pack(side="left")
-
-        ctk.CTkButton(
-            backend_btn_row,
-            text="로그아웃",
-            height=STYLES["button_height_sm"],
-            fg_color=COLORS["input"],
-            hover_color=COLORS["card_hover"],
-            border_width=1,
-            border_color=COLORS["border"],
-            corner_radius=STYLES["button_radius"],
-            font=_font(13),
-            text_color=COLORS["text_2"],
-            command=self._on_backend_logout,
-        ).pack(side="left", padx=(SP["sm"], 0))
-
-        ctk.CTkButton(
-            backend_btn_row,
-            text="도메인 동기화",
-            height=STYLES["button_height_sm"],
-            fg_color=COLORS["input"],
-            hover_color=COLORS["card_hover"],
-            border_width=1,
-            border_color=COLORS["border"],
-            corner_radius=STYLES["button_radius"],
-            font=_font(13),
-            text_color=COLORS["text_2"],
-            command=self._on_backend_sync,
-        ).pack(side="left", padx=(SP["sm"], 0))
-
-        self._sync_backend_status_labels()
-
         # Buttons
         btn_row = ctk.CTkFrame(card, fg_color="transparent")
-        btn_row.grid(row=13, column=0, columnspan=2, sticky="ew", padx=SP["2xl"], pady=(SP["lg"], SP["2xl"]))
+        btn_row.grid(row=4, column=0, columnspan=2, sticky="ew", padx=SP["2xl"], pady=(SP["lg"], SP["2xl"]))
 
         ctk.CTkButton(
             btn_row,
@@ -576,59 +603,6 @@ class SettingsDialog(ctk.CTkToplevel):
 
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
-    def _save_backend_fields(self) -> None:
-        prev_base = normalize_base_url(self.app.db.get_setting(SETTING_BACKEND_BASE_URL, ""))
-        prev_key = self.app.db.get_setting(SETTING_BACKEND_LICENSE_KEY, "").strip()
-
-        new_base = normalize_base_url(self.entry_backend_url.get().strip())
-        new_key = self.entry_license_key.get().strip()
-        new_device = self.entry_device_id.get().strip() or self.app._default_device_id()
-
-        self.app.db.set_setting(SETTING_BACKEND_BASE_URL, new_base)
-        self.app.db.set_setting(SETTING_BACKEND_LICENSE_KEY, new_key)
-        self.app.db.set_setting(SETTING_BACKEND_DEVICE_ID, new_device)
-
-        if new_base != prev_base or new_key != prev_key:
-            self.app._clear_backend_session()
-
-    def _sync_backend_status_labels(self) -> None:
-        token = self.app.db.get_setting(SETTING_BACKEND_TOKEN, "").strip()
-        company = self.app.db.get_setting(SETTING_BACKEND_COMPANY, "").strip()
-        status = self.app.db.get_setting(SETTING_BACKEND_STATUS, "").strip()
-        expires_text = self.app._format_license_expiry(self.app.db.get_setting(SETTING_BACKEND_EXPIRES_AT, ""))
-
-        if token:
-            state = "active" if status == "active" else (status or "unknown")
-            self.lbl_backend_status.configure(
-                text=f"라이센스: 로그인됨 ({company or '-'} / {state})",
-                text_color=COLORS["success"] if status == "active" else COLORS["warning"],
-            )
-        else:
-            self.lbl_backend_status.configure(text="라이센스: 미로그인", text_color=COLORS["text_4"])
-
-        self.lbl_backend_expires.configure(text=f"만료: {expires_text}")
-
-    def _on_backend_login(self) -> None:
-        self._save_backend_fields()
-        ok, msg = self.app._backend_login(notify=False)
-        self._sync_backend_status_labels()
-        self.app._refresh_license_status_label()
-        self.app.toast(msg, "success" if ok else "error")
-
-    def _on_backend_logout(self) -> None:
-        self._save_backend_fields()
-        ok, msg = self.app._backend_logout(notify=False)
-        self._sync_backend_status_labels()
-        self.app._refresh_license_status_label()
-        self.app.toast(msg, "success" if ok else "warning")
-
-    def _on_backend_sync(self) -> None:
-        self._save_backend_fields()
-        ok, msg = self.app._sync_platform_domains_from_backend(notify=False)
-        self._sync_backend_status_labels()
-        self.app._refresh_license_status_label()
-        self.app.toast(msg, "success" if ok else "error")
-
     def _apply(self) -> None:
         try:
             poll_interval = float(self.entry_poll_interval.get().strip())
@@ -643,8 +617,6 @@ class SettingsDialog(ctk.CTkToplevel):
         self.app.db.set_setting("poll_interval", str(poll_interval))
         self.app.db.set_setting("auto_start", "1" if self.var_auto_start.get() else "0")
         self.app.db.set_setting("simulate_mode", "1" if self.var_simulate.get() else "0")
-        self.app.db.set_setting("captcha_api_key", self.entry_captcha_key.get().strip())
-        self._save_backend_fields()
 
         was_running = self.app.engine.is_running
         self.app.engine.stop()
@@ -676,8 +648,10 @@ class WorkerDashboardApp(ctk.CTk):
         self.geometry("1320x900")
         self.minsize(1160, 780)
         self.configure(fg_color=COLORS["bg"])
+        self.withdraw()
 
-        if getattr(sys, "frozen", False):
+        if getattr(sys, "frozen", False) or "__compiled__" in globals():
+            # Compiled mode: PyInstaller (sys.frozen) or Nuitka (__compiled__)
             self.base_dir = Path(sys.executable).resolve().parent
             self.data_dir = Path.home() / "jump_worker_dashboard" / "data"
         else:
@@ -722,13 +696,9 @@ class WorkerDashboardApp(ctk.CTk):
         self._reload_workflow_list()
         self._refresh_stats()
 
-        # 기본값은 OFF
-        if self.db.get_setting("auto_start", "0") == "1":
-            self.engine.start()
-
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(250, self._ui_tick)
-        self.after(900, self._bootstrap_backend_sync)
+        self.after(900, self._startup_with_license_gate)
 
     # ===== Reusable Widgets =====
 
@@ -809,12 +779,42 @@ class WorkerDashboardApp(ctk.CTk):
         ctk.CTkLabel(
             frame,
             text=text,
-            font=_font(12, "bold"),
+            font=_font(14, "bold"),
             text_color=COLORS["text_3"],
         ).pack(side="left")
         return frame
 
     # ===== Backend / License =====
+
+    def _startup_with_license_gate(self) -> None:
+        authenticated = False
+
+        self.db.set_setting(SETTING_BACKEND_BASE_URL, HARDCODED_BACKEND_URL)
+        license_key = self.db.get_setting(SETTING_BACKEND_LICENSE_KEY, "").strip()
+        if license_key:
+            ok, msg = self._backend_login(notify=False)
+            if ok:
+                authenticated = True
+                ok_sync, msg_sync = self._sync_platform_domains_from_backend(notify=False)
+                if not ok_sync:
+                    self.log_bus.emit(msg_sync, "WARNING")
+            else:
+                self.log_bus.emit(f"백엔드 로그인 실패: {msg}", "WARNING")
+
+        if not authenticated:
+            gate = LicenseGateDialog(self)
+            self.wait_window(gate)
+            if not gate.result():
+                self.destroy()
+                return
+
+        self._refresh_license_status_label()
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+
+        if self.db.get_setting("auto_start", "0") == "1":
+            self.engine.start()
 
     def _default_device_id(self) -> str:
         raw = f"{platform.node()}|{platform.system()}|{platform.machine()}"
@@ -832,10 +832,7 @@ class WorkerDashboardApp(ctk.CTk):
         return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
 
     def _backend_client(self) -> WorkerBackendClient | None:
-        base_url = normalize_base_url(self.db.get_setting(SETTING_BACKEND_BASE_URL, ""))
-        if not base_url:
-            return None
-        return WorkerBackendClient(BackendConfig(base_url=base_url))
+        return WorkerBackendClient(BackendConfig(base_url=HARDCODED_BACKEND_URL))
 
     def _clear_backend_session(self) -> None:
         self.db.set_setting(SETTING_BACKEND_TOKEN, "")
@@ -850,14 +847,15 @@ class WorkerDashboardApp(ctk.CTk):
         expires_text = self._format_license_expiry(self.db.get_setting(SETTING_BACKEND_EXPIRES_AT, ""))
 
         if token:
-            state = "active" if status == "active" else (status or "unknown")
-            color = COLORS["success"] if status == "active" else COLORS["warning"]
-            self.sidebar_license.configure(
-                text=f"라이센스: {company or '-'} ({state}) / 만료 {expires_text}",
-                text_color=color,
-            )
+            STATUS_MAP = {"active": ("활성", COLORS["success"]), "suspended": ("정지", COLORS["warning"]), "revoked": ("폐기", COLORS["error"])}
+            state_label, state_color = STATUS_MAP.get(status, (status or "unknown", COLORS["text_3"]))
+            self.sidebar_lic_company.configure(text=f"업체: {company or '-'}", text_color=COLORS["text"])
+            self.sidebar_lic_status.configure(text=f"상태: {state_label}", text_color=state_color)
+            self.sidebar_lic_expiry.configure(text=f"만료: {expires_text}", text_color=COLORS["text_3"])
         else:
-            self.sidebar_license.configure(text="라이센스: 미로그인", text_color=COLORS["text_4"])
+            self.sidebar_lic_company.configure(text="라이센스: 미로그인", text_color=COLORS["text_4"])
+            self.sidebar_lic_status.configure(text="")
+            self.sidebar_lic_expiry.configure(text="")
 
     def _backend_login(self, *, notify: bool = True) -> tuple[bool, str]:
         client = self._backend_client()
@@ -933,6 +931,13 @@ class WorkerDashboardApp(ctk.CTk):
     def _apply_domains_to_workflows(self, mapping: dict[str, str]) -> int:
         changed = 0
         for wf in self.db.list_workflows():
+            # 비활성화된 사이트는 도메인 비우기
+            if not is_platform_enabled(wf.site_key):
+                if (wf.domain or "").strip():
+                    wf.domain = ""
+                    self.db.save_workflow(wf)
+                    changed += 1
+                continue
             new_domain = (mapping.get(wf.site_key) or "").strip()
             if not new_domain or new_domain == (wf.domain or "").strip():
                 continue
@@ -991,16 +996,24 @@ class WorkerDashboardApp(ctk.CTk):
                 self.toast(msg, "error")
             return False, msg
 
+        # 기존 로컬 enabled 상태 보존
+        existing_full = load_platform_domains_full()
+
         mapping: dict[str, str] = {}
+        full_mapping: dict[str, dict] = {}
         for k, v in domains_raw.items():
             if not isinstance(k, str):
                 continue
             key = k.strip()
             if not key:
                 continue
-            mapping[key] = (str(v).strip() if v is not None else "")
+            domain = str(v).strip() if v is not None else ""
+            mapping[key] = domain
+            # 로컬에 enabled 상태가 있으면 보존, 없으면 True
+            local_enabled = existing_full.get(key, {}).get("enabled", True)
+            full_mapping[key] = {"domain": domain, "enabled": local_enabled}
 
-        save_platform_domains(mapping)
+        save_platform_domains_full(full_mapping)
         changed = self._apply_domains_to_workflows(mapping)
 
         self._sync_domain_from_platform()
@@ -1106,14 +1119,14 @@ class WorkerDashboardApp(ctk.CTk):
         ctk.CTkLabel(
             info,
             text="상태",
-            font=_font(13),
+            font=_font(14),
             text_color=COLORS["text_4"],
         ).pack(anchor="w", pady=(0, SP["sm"]))
 
         self.sidebar_state = ctk.CTkLabel(
             info,
             text="엔진: 중지",
-            font=_font(12, "bold"),
+            font=_font(14, "bold"),
             text_color=COLORS["error"],
         )
         self.sidebar_state.pack(anchor="w")
@@ -1121,7 +1134,7 @@ class WorkerDashboardApp(ctk.CTk):
         self.sidebar_queue = ctk.CTkLabel(
             info,
             text="대기열: 0",
-            font=_font(13),
+            font=_font(14),
             text_color=COLORS["text_3"],
         )
         self.sidebar_queue.pack(anchor="w", pady=(SP["xs"], 0))
@@ -1129,22 +1142,40 @@ class WorkerDashboardApp(ctk.CTk):
         self.sidebar_current = ctk.CTkLabel(
             info,
             text="현재: -",
-            font=_font(13),
+            font=_font(14),
             text_color=COLORS["text_3"],
             wraplength=230,
             justify="left",
         )
         self.sidebar_current.pack(anchor="w", pady=(SP["xs"], 0))
 
-        self.sidebar_license = ctk.CTkLabel(
-            info,
-            text="라이센스: 미로그인",
-            font=_font(12),
+        # License info block
+        lic_frame = ctk.CTkFrame(info, fg_color="transparent")
+        lic_frame.pack(anchor="w", fill="x", pady=(SP["md"], 0))
+
+        self.sidebar_lic_company = ctk.CTkLabel(
+            lic_frame,
+            text="미로그인",
+            font=_font(14, "bold"),
             text_color=COLORS["text_4"],
-            wraplength=230,
-            justify="left",
         )
-        self.sidebar_license.pack(anchor="w", pady=(SP["sm"], 0))
+        self.sidebar_lic_company.pack(anchor="w")
+
+        self.sidebar_lic_status = ctk.CTkLabel(
+            lic_frame,
+            text="",
+            font=_font(14),
+            text_color=COLORS["text_4"],
+        )
+        self.sidebar_lic_status.pack(anchor="w", pady=(2, 0))
+
+        self.sidebar_lic_expiry = ctk.CTkLabel(
+            lic_frame,
+            text="",
+            font=_font(14),
+            text_color=COLORS["text_4"],
+        )
+        self.sidebar_lic_expiry.pack(anchor="w", pady=(2, 0))
 
         # Bottom
         bottom = ctk.CTkFrame(sidebar, fg_color="transparent")
@@ -1373,7 +1404,7 @@ class WorkerDashboardApp(ctk.CTk):
             border_width=1,
             border_color=COLORS["border"],
             corner_radius=STYLES["pill_radius"],
-            font=_font(12),
+            font=_font(14),
             text_color=COLORS["text_4"],
             command=self._on_stats_reset,
         ).grid(row=0, column=1, sticky="e")
@@ -1487,7 +1518,7 @@ class WorkerDashboardApp(ctk.CTk):
             corner_radius=STYLES["pill_radius"],
             font=_font(13),
             text_color=COLORS["text_4"],
-            command=self._on_stats_reset,
+            command=self._on_activity_reset,
         )
         self.activity_reset_btn.pack(side="right", padx=(0, SP["sm"]))
 
@@ -2078,7 +2109,7 @@ class WorkerDashboardApp(ctk.CTk):
                 border_width=1,
                 border_color=COLORS["border"],
                 corner_radius=6,
-                font=_font(11, "bold"),
+                font=_font(14, "bold"),
                 text_color=COLORS["text_2"],
                 command=lambda wid=int(wf.id): self._run_workflow_now(wid),
             ).pack(side="right", padx=(SP["sm"], 0))
@@ -2551,6 +2582,15 @@ class WorkerDashboardApp(ctk.CTk):
         for line in new_lines:
             self._insert_colored_log(line)
         self.activity_text.see("end")
+
+    def _on_activity_reset(self) -> None:
+        """현재 활성 탭에 따라 초기화 동작 분기."""
+        if self.activity_mode.get() == "실행 기록":
+            self._on_stats_reset()
+        else:
+            self._log_lines.clear()
+            self._render_logs(full=True)
+            self.toast("실시간 로그가 초기화되었습니다.", "success")
 
     def _on_stats_reset(self) -> None:
         """실행 기록 초기화 → 요약 카운트 리셋."""

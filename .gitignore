@@ -32,6 +32,9 @@ dist/
 *.sqlite3
 *.db
 
+# Build-time copies (CI가 jump_site_modules를 빌드 디렉토리로 복사)
+jump_worker_dashboard/jump_site_modules/
+
 # Project-specific runtime files
 jump_worker_dashboard/data/artifacts/
 jump_worker_dashboard/data/*.db

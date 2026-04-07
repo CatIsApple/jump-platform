@@ -26,12 +26,24 @@ python -m pip install \
 
 rm -rf "$BUILD_DIR" "$DIST_DIR/$APP_NAME" "$DIST_DIR/$APP_NAME.app"
 
+# jump_site_modules: CI가 복사하거나, monorepo 루트에서 가져옴
+if [[ ! -d "jump_site_modules" && -d "../jump_site_modules" ]]; then
+  cp -r ../jump_site_modules ./jump_site_modules
+fi
+
 pyinstaller \
   --noconfirm \
   --clean \
   --windowed \
   --name "$APP_NAME" \
   --add-data "assets:assets" \
+  --add-data "jump_site_modules:jump_site_modules" \
+  --hidden-import=jump_site_modules \
+  --hidden-import=jump_site_modules.base \
+  --hidden-import=jump_site_modules.exceptions \
+  --hidden-import=jump_site_modules.gnuboard_base \
+  --hidden-import=jump_site_modules.types \
+  --collect-submodules=jump_site_modules \
   main.py
 
 ZIP_OUT="$DIST_DIR/${APP_NAME}-macos.zip"

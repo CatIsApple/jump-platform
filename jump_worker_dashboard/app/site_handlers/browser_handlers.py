@@ -530,11 +530,12 @@ def opguide(driver: Any, user: dict, emit: Callable[[str, str], None]) -> tuple[
         if status != STATUS_UNKNOWN:
             return status, msg
 
-    # 카운트다운 체크 (대기 신호)
+    # 카운트다운 체크: fnJump() 호출 후 카운트다운이 나타나면 점프가 성공한 것
+    # (점프 성공 → 다음 점프까지 대기 타이머 표시)
     timer = _wait_for_countdown(driver, By, timeout_s=6.0)
     if timer:
-        emit(f"[대기] {user['name']} - {user['id']}: {user['startedAt']} {timer}", "INFO")
-        return STATUS_COOLDOWN, timer
+        emit(f"[성공] {user['name']} - {user['id']}: {user['startedAt']} 점프 실행 (다음: {timer})", "INFO")
+        return STATUS_SUCCESS, f"점프 실행 (다음: {timer})"
 
     emit(f"[성공] {user['name']} - {user['id']}: {user['startedAt']} 점프 실행", "INFO")
     return STATUS_SUCCESS, "점프 실행"

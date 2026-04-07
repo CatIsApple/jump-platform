@@ -13,7 +13,7 @@ from .exceptions import UserInterventionRequired
 from .file_manager import artifacts_dir, cleanup_artifacts
 from .handlers import execute_workflow, requires_browser
 from .log_bus import LogBus
-from .site_handlers.browser_handlers import configure_captcha
+from .platform_domains import is_platform_enabled
 
 
 @dataclass(frozen=True)
@@ -302,6 +302,9 @@ class WorkerEngine:
                 if not wf.enabled:
                     self.log_bus.emit(f"중지된 작업이라 건너뜁니다: {wf.name}", "INFO")
                     continue
+                if not is_platform_enabled(wf.site_key):
+                    self.log_bus.emit(f"플랫폼 비활성 사이트라 건너뜁니다: {wf.name} ({wf.site_key})", "INFO")
+                    continue
 
                 started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 trigger = "스케줄" if item.trigger_type == "scheduled" else "수동"
@@ -347,13 +350,6 @@ class WorkerEngine:
                                 driver.execute_script("window.sessionStorage.clear(); window.localStorage.clear();")
                             except Exception:
                                 pass
-
-                            # 2Captcha API 키 설정
-                            captcha_key = self.db.get_setting("captcha_api_key", "")
-                            configure_captcha(
-                                captcha_key,
-                                lambda msg, level="INFO": self.log_bus.emit(msg, level),
-                            )
 
                         status, message = execute_workflow(
                             wf,

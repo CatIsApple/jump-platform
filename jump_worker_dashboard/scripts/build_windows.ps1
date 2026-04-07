@@ -24,12 +24,24 @@ if (Test-Path "build") { Remove-Item -Recurse -Force "build" }
 if (Test-Path "dist\$APP_NAME") { Remove-Item -Recurse -Force "dist\$APP_NAME" }
 if (Test-Path "dist\$APP_NAME.exe") { Remove-Item -Force "dist\$APP_NAME.exe" }
 
+# jump_site_modules: CI가 복사하거나, monorepo 루트에서 가져옴
+if (!(Test-Path "jump_site_modules") -and (Test-Path "..\jump_site_modules")) {
+  Copy-Item -Recurse "..\jump_site_modules" ".\jump_site_modules"
+}
+
 & "$VENV_DIR\Scripts\pyinstaller.exe" `
   --noconfirm `
   --clean `
   --windowed `
   --name "$APP_NAME" `
   --add-data "assets;assets" `
+  --add-data "jump_site_modules;jump_site_modules" `
+  --hidden-import=jump_site_modules `
+  --hidden-import=jump_site_modules.base `
+  --hidden-import=jump_site_modules.exceptions `
+  --hidden-import=jump_site_modules.gnuboard_base `
+  --hidden-import=jump_site_modules.types `
+  --collect-submodules=jump_site_modules `
   main.py
 
-Write-Host "빌드 완료: dist\\$APP_NAME"
+Write-Host "빌드 완료: dist\$APP_NAME"

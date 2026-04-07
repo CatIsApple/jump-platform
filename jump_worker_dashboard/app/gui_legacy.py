@@ -60,8 +60,15 @@ LEVEL_KOR = {
 
 
 def _resource_base() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys._MEIPASS)  # type: ignore[attr-defined]
+    # PyInstaller: _MEIPASS points to the temp extraction directory
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(meipass)
+    # Nuitka (standalone/onefile): assets are next to the executable
+    exe_dir = Path(sys.executable).resolve().parent
+    if (exe_dir / "assets").is_dir():
+        return exe_dir
+    # Source / development mode
     return Path(__file__).resolve().parents[1]
 
 
@@ -348,7 +355,10 @@ class WorkerDashboardApp(ctk.CTk):
         self.configure(fg_color=COLORS["bg_dark"])
 
         self.base_dir = Path(__file__).resolve().parent.parent
-        self.data_dir = self.base_dir / "data"
+        if getattr(sys, "frozen", False) or "__compiled__" in globals():
+            self.data_dir = Path.home() / "jump_worker_dashboard" / "data"
+        else:
+            self.data_dir = self.base_dir / "data"
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
         self.db = Database(self.data_dir / "worker_dashboard.db")

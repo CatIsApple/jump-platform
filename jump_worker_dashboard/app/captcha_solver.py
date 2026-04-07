@@ -1,6 +1,7 @@
 """Cloudflare Turnstile 캡차 자동 해결 (2Captcha 기반).
 
 디컴파일된 원본 OpJumFun.py의 robotPass/solver_captcha 로직을 이식 + 개선.
+Cloudflare managed challenge 지원 강화.
 """
 
 from __future__ import annotations
@@ -22,8 +23,8 @@ _INTERCEPT_SCRIPT = """
 console.clear = () => console.log('Console was cleared');
 const i = setInterval(()=>{
     if (window.turnstile) {
-        console.log('success!!');
         clearInterval(i);
+        const _origRender = window.turnstile.render;
         window.turnstile.render = (a, b) => {
             let params = {
                 sitekey: b.sitekey,
@@ -34,20 +35,17 @@ const i = setInterval(()=>{
                 userAgent: navigator.userAgent,
             };
             window.interceptedParams = params;
-            console.log('intercepted-params:' + JSON.stringify(params));
             window.cfCallback = b.callback;
-            return;
-        }
+            console.log('intercepted-params:' + JSON.stringify(params));
+            return _origRender.call(window.turnstile, a, b);
+        };
     }
-}, 50);
+}, 10);
 """
 
 
 def is_robot_page(driver: Any) -> bool:
-    """현재 페이지가 로봇/캡차 확인 페이지인지 감지.
-
-    원본 robotPass 로직과 동일하게 Cloudflare 한국어 챌린지 텍스트만 체크.
-    """
+    """현재 페이지가 로봇/캡차 확인 페이지인지 감지."""
     try:
         src = driver.page_source or ""
     except Exception:
@@ -64,7 +62,7 @@ def _extract_sitekey_from_dom(driver: Any) -> str | None:
         return None
 
     # 1) data-sitekey 속성에서 추출
-    m = re.search(r'data-sitekey=["\']([0-9x A-Za-z_-]+)["\']', src)
+    m = re.search(r'data-sitekey=["\']([0-9xA-Za-z_-]+)["\']', src)
     if m:
         return m.group(1)
 
@@ -79,11 +77,28 @@ def _extract_sitekey_from_dom(driver: Any) -> str | None:
             return m.group(1)
 
     # 3) iframe src에서 추출
-    m = re.search(r'challenges\.cloudflare\.com/cdn-cgi/challenge-platform[^"]*sitekey=([^&"]+)', src)
+    m = re.search(
+        r'challenges\.cloudflare\.com/cdn-cgi/challenge-platform[^"]*sitekey=([^&"]+)',
+        src,
+    )
     if m:
         return m.group(1)
 
-    # 4) Selenium으로 DOM 요소 직접 탐색
+    # 4) Turnstile API 스크립트 URL에서 추출
+    #    예: challenges.cloudflare.com/turnstile/v0/g/{sitekey}/api.js
+    m = re.search(
+        r'challenges\.cloudflare\.com/turnstile/v0/g/([0-9a-fA-F]+)/api\.js',
+        src,
+    )
+    if m:
+        return m.group(1)
+
+    # 5) 0x로 시작하는 Turnstile sitekey 패턴
+    m = re.search(r'["\']?(0x[A-Za-z0-9_-]{20,})["\']?', src)
+    if m:
+        return m.group(1)
+
+    # 6) Selenium으로 DOM 요소 직접 탐색
     try:
         el = driver.find_element("css selector", "[data-sitekey]")
         sk = el.get_attribute("data-sitekey")
@@ -92,9 +107,12 @@ def _extract_sitekey_from_dom(driver: Any) -> str | None:
     except Exception:
         pass
 
-    # 5) iframe 내부 탐색
+    # 7) iframe 내부 탐색
     try:
-        iframes = driver.find_elements("css selector", "iframe[src*='turnstile'], iframe[src*='challenges.cloudflare']")
+        iframes = driver.find_elements(
+            "css selector",
+            "iframe[src*='turnstile'], iframe[src*='challenges.cloudflare']",
+        )
         for iframe in iframes:
             iframe_src = iframe.get_attribute("src") or ""
             m = re.search(r'sitekey=([^&]+)', iframe_src)
@@ -103,34 +121,103 @@ def _extract_sitekey_from_dom(driver: Any) -> str | None:
     except Exception:
         pass
 
+    # 8) JS로 Turnstile 스크립트 src에서 추출
+    try:
+        sk = driver.execute_script("""
+            var scripts = document.querySelectorAll('script[src*="turnstile"]');
+            for (var i = 0; i < scripts.length; i++) {
+                var m = scripts[i].src.match(/\\/g\\/([0-9a-fA-F]+)\\/api\\.js/);
+                if (m) return m[1];
+            }
+            return null;
+        """)
+        if sk:
+            return sk
+    except Exception:
+        pass
+
     return None
+
+
+def _try_click_checkbox(driver: Any, emit: Callable | None = None) -> bool:
+    """Turnstile 체크박스 클릭 시도 (non-interactive challenge는 자동 통과)."""
+    _log = emit or (lambda msg, level: None)
+
+    try:
+        # Turnstile iframe 찾기
+        iframes = driver.find_elements(
+            "css selector",
+            "iframe[src*='turnstile'], iframe[src*='challenges.cloudflare']",
+        )
+        if not iframes:
+            # managed challenge의 경우 iframe이 없을 수 있음
+            # 직접 체크박스 영역 클릭 시도
+            try:
+                checkbox = driver.find_element(
+                    "css selector",
+                    "#cf-turnstile-wrapper, .cf-turnstile, [data-cf-turnstile-response]",
+                )
+                checkbox.click()
+                _log("Turnstile 체크박스 영역 클릭.", "DEBUG")
+                time.sleep(3)
+                return not is_robot_page(driver)
+            except Exception:
+                pass
+            return False
+
+        for iframe in iframes:
+            try:
+                driver.switch_to.frame(iframe)
+                # iframe 내부 체크박스 클릭
+                try:
+                    cb = driver.find_element(
+                        "css selector",
+                        "input[type='checkbox'], .ctp-checkbox-label, #cf-stage",
+                    )
+                    cb.click()
+                    _log("Turnstile iframe 체크박스 클릭.", "DEBUG")
+                except Exception:
+                    # 클릭 가능 영역 전체 클릭
+                    body = driver.find_element("css selector", "body")
+                    body.click()
+                driver.switch_to.default_content()
+                time.sleep(3)
+                if not is_robot_page(driver):
+                    return True
+            except Exception:
+                try:
+                    driver.switch_to.default_content()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return False
 
 
 def _get_captcha_params_cdp(driver: Any) -> dict | None:
     """CDP를 사용하여 페이지 로드 전에 인터셉트 스크립트를 주입하고 파라미터 추출."""
     try:
-        # CDP 명령으로 페이지 로드 전 스크립트 등록
         driver.execute_cdp_cmd(
             "Page.addScriptToEvaluateOnNewDocument",
             {"source": _INTERCEPT_SCRIPT},
         )
     except Exception:
-        # CDP 미지원 시 폴백
         return _get_captcha_params_fallback(driver)
 
     try:
         url = driver.current_url
-        driver.get(url)  # 같은 URL 새로 로드 (인터셉트 활성 상태)
+        driver.get(url)
     except Exception:
         return None
 
-    # 파라미터 폴링 (최대 10초)
-    end = time.time() + 10.0
+    # 파라미터 폴링 (최대 20초 - managed challenge는 느릴 수 있음)
+    end = time.time() + 20.0
     while time.time() < end:
         time.sleep(0.5)
         try:
             params = driver.execute_script("return window.interceptedParams;")
-            if params:
+            if params and params.get("sitekey"):
                 return params
         except Exception:
             pass
@@ -161,7 +248,9 @@ def _get_captcha_params_fallback(driver: Any) -> dict | None:
     }
 
 
-def _solve_captcha(params: dict, api_key: str, emit: Callable | None = None) -> str | None:
+def _solve_captcha(
+    params: dict, api_key: str, emit: Callable | None = None
+) -> str | None:
     """2Captcha API로 Turnstile 캡차를 풀고 토큰 반환."""
     _log = emit or (lambda msg, level: None)
 
@@ -173,9 +262,10 @@ def _solve_captcha(params: dict, api_key: str, emit: Callable | None = None) -> 
 
     try:
         solver = TwoCaptcha(api_key)
-        _log(f"2Captcha 요청: sitekey={params['sitekey'][:20]}...", "DEBUG")
+        sk = params["sitekey"]
+        _log(f"2Captcha Turnstile 요청: sitekey={sk[:20]}...", "DEBUG")
         result = solver.turnstile(
-            sitekey=params["sitekey"],
+            sitekey=sk,
             url=params["pageurl"],
             action=params.get("action"),
             data=params.get("data"),
@@ -196,7 +286,9 @@ def _inject_token(driver: Any, token: str, emit: Callable | None = None) -> bool
     # 방법 1: cfCallback 호출 (인터셉트로 캡처한 콜백)
     try:
         result = driver.execute_script(
-            f"if(typeof window.cfCallback==='function'){{window.cfCallback('{token}');return true;}}return false;"
+            "if(typeof window.cfCallback==='function')"
+            "{window.cfCallback(arguments[0]);return true;}return false;",
+            token,
         )
         if result:
             _log("cfCallback으로 토큰 전달 성공.", "DEBUG")
@@ -206,41 +298,70 @@ def _inject_token(driver: Any, token: str, emit: Callable | None = None) -> bool
 
     # 방법 2: Turnstile 숨김 필드에 토큰 직접 주입
     try:
-        driver.execute_script(f"""
-            var fields = document.querySelectorAll(
-                'input[name="cf-turnstile-response"], input[name="g-recaptcha-response"], input[name="h-captcha-response"]'
-            );
-            fields.forEach(function(f) {{ f.value = '{token}'; }});
-            var containers = document.querySelectorAll('[data-sitekey]');
-            containers.forEach(function(c) {{
+        driver.execute_script(
+            """
+            var token = arguments[0];
+            var selectors = [
+                'input[name="cf-turnstile-response"]',
+                'input[name="g-recaptcha-response"]',
+                'input[name="h-captcha-response"]',
+                'input[id*="cf-chl-widget"][id*="response"]',
+            ];
+            selectors.forEach(function(sel) {
+                document.querySelectorAll(sel).forEach(function(f) {
+                    f.value = token;
+                });
+            });
+            document.querySelectorAll('[data-sitekey]').forEach(function(c) {
                 var inp = c.querySelector('input[type="hidden"]');
-                if (inp) inp.value = '{token}';
-            }});
-        """)
+                if (inp) inp.value = token;
+            });
+            """,
+            token,
+        )
         _log("숨김 필드에 토큰 주입 완료.", "DEBUG")
         success = True
     except Exception:
         pass
 
-    # 방법 3: turnstile.getResponse를 오버라이드하여 토큰 반환하도록
+    # 방법 3: turnstile.getResponse를 오버라이드
     try:
-        driver.execute_script(f"""
-            if (window.turnstile) {{
-                window.turnstile.getResponse = function() {{ return '{token}'; }};
-            }}
-        """)
+        driver.execute_script(
+            """
+            if (window.turnstile) {
+                window.turnstile.getResponse = function() { return arguments[0]; };
+            }
+            """,
+            token,
+        )
     except Exception:
         pass
 
     # 방법 4: Cloudflare 챌린지 폼 제출
     try:
-        driver.execute_script(f"""
-            var forms = document.querySelectorAll('form[action*="cdn-cgi"], form.challenge-form');
-            forms.forEach(function(form) {{
-                var inp = form.querySelector('input[type="hidden"]');
-                if (inp) {{ inp.value = '{token}'; form.submit(); }}
-            }});
-        """)
+        driver.execute_script(
+            """
+            var token = arguments[0];
+            var forms = document.querySelectorAll(
+                'form[action*="cdn-cgi"], form.challenge-form, form[id*="challenge"]'
+            );
+            if (forms.length === 0) {
+                // managed challenge: 숨김 폼 찾기
+                forms = document.querySelectorAll('form');
+            }
+            forms.forEach(function(form) {
+                var inputs = form.querySelectorAll('input[type="hidden"]');
+                inputs.forEach(function(inp) {
+                    if (inp.name.includes('turnstile') || inp.name.includes('cf-')
+                        || inp.name.includes('captcha') || inp.name.includes('response')) {
+                        inp.value = token;
+                    }
+                });
+                form.submit();
+            });
+            """,
+            token,
+        )
     except Exception:
         pass
 
@@ -269,27 +390,36 @@ def robot_pass(
         _log("2Captcha API 키가 설정되지 않았습니다.", "ERROR")
         return False
 
-    # ── 1단계: 자동 통과 대기 (Cloudflare JS challenge는 보통 10~15초 내 통과) ──
-    _log("Cloudflare 자동 통과 대기 중... (최대 15초)", "INFO")
-    for i in range(15):
+    # ── 1단계: 자동 통과 대기 (Cloudflare JS challenge는 보통 5~10초 내 통과) ──
+    _log("Cloudflare 자동 통과 대기 중... (최대 10초)", "INFO")
+    for _ in range(10):
         time.sleep(1)
         if not is_robot_page(driver):
             _log("Cloudflare 보안 자동 통과 완료.", "INFO")
             return True
 
+    # ── 1.5단계: 체크박스 클릭 시도 ──
+    _log("체크박스 클릭 시도...", "INFO")
+    if _try_click_checkbox(driver, _log):
+        _log("체크박스 클릭으로 통과 성공.", "INFO")
+        return True
+
     # ── 2단계: 아직 캡차 페이지 → Turnstile 풀기 시도 ──
     _log("자동 통과 실패. Turnstile 캡차 풀이를 시도합니다...", "INFO")
 
-    # 2-a) DOM에서 sitekey 직접 추출 시도 (빠르고 안정적)
-    params = _get_captcha_params_fallback(driver)
-    if params:
-        _log(f"DOM에서 sitekey 추출 성공: {params['sitekey'][:20]}...", "INFO")
+    # 2-a) CDP 인터셉트 방식 시도 (가장 정확한 sitekey 추출)
+    _log("CDP 인터셉트로 sitekey 추출 시도...", "INFO")
+    params = _get_captcha_params_cdp(driver)
+    if params and params.get("sitekey"):
+        _log(f"CDP 인터셉트 성공: sitekey={params['sitekey'][:20]}...", "INFO")
     else:
-        # 2-b) CDP 인터셉트 방식 시도
-        _log("DOM 추출 실패. CDP 인터셉트 방식 시도...", "INFO")
-        params = _get_captcha_params_cdp(driver)
+        # 2-b) DOM에서 sitekey 직접 추출 시도
+        _log("CDP 실패. DOM에서 sitekey 추출 시도...", "INFO")
+        params = _get_captcha_params_fallback(driver)
+        if params:
+            _log(f"DOM에서 sitekey 추출 성공: {params['sitekey'][:20]}...", "INFO")
 
-    if not params:
+    if not params or not params.get("sitekey"):
         _log("캡차 파라미터 추출 실패. (sitekey를 찾을 수 없음)", "ERROR")
         return False
 
@@ -310,13 +440,11 @@ def robot_pass(
     time.sleep(3)
 
     # ── 5단계: 통과 확인 ──
-    # 페이지가 아직 챌린지면 폼 제출 + 새로고침 시도
     if is_robot_page(driver):
         _log("토큰 전달 후 추가 대기...", "DEBUG")
         time.sleep(5)
 
     if is_robot_page(driver):
-        # 마지막으로 리프레시해서 확인
         try:
             driver.refresh()
         except Exception:

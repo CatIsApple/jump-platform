@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import os
+from dataclasses import dataclass
 from datetime import datetime
+from time import monotonic
 from typing import Any
 
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, VerticalScroll
-from textual.message import Message
-from textual.screen import ModalScreen, Screen
+from textual.containers import Container, Horizontal
+from textual.events import Key
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static, TabbedContent, TabPane
 
 from .api import AdminApiConfig, ApiError, JumpAdminApi
@@ -31,377 +32,275 @@ class Toast(Static):
         self.update(msg)
 
 
-# ---------------------------------------------------------------------------
-# Modal: 설정
-# ---------------------------------------------------------------------------
-class ConfigScreen(ModalScreen[AppConfig | None]):
-    BINDINGS = [
-        Binding("escape", "cancel", "닫기", show=False),
-    ]
-
-    DEFAULT_CSS = """
-    ConfigScreen {
-      align: center middle;
-    }
-    #card {
-      width: 80%;
-      max-width: 88;
-      max-height: 90%;
-      border: solid #2b2b2b;
-      padding: 1 2;
-      background: #101010;
-    }
-    #title {
-      text-style: bold;
-      margin: 0 0 1 0;
-    }
-    Input {
-      margin: 0 0 1 0;
-    }
-    .btn-row {
-      height: 3;
-      margin: 1 0 0 0;
-    }
-    .btn-row Button {
-      margin: 0 1 0 0;
-    }
-    """
-
-    def __init__(self, cfg: AppConfig) -> None:
-        super().__init__()
-        self.cfg = cfg
-
-    def on_mount(self) -> None:
-        inputs = list(self.query(Input))
-        if inputs:
-            self.set_focus(inputs[0])
-
-    def compose(self) -> ComposeResult:
-        with VerticalScroll(id="card"):
-            yield Label("설정", id="title")
-            yield Label("API 기본 URL (예: https://api.example.com)")
-            yield Input(value=self.cfg.api_base_url, placeholder="https://api.example.com", id="api_base_url")
-            yield Label("Cloudflare Access Client ID")
-            yield Input(value=self.cfg.access_client_id, placeholder="CF-Access-Client-Id", id="access_client_id")
-            yield Label("Cloudflare Access Client Secret")
-            yield Input(value=self.cfg.access_client_secret, password=True, placeholder="CF-Access-Client-Secret", id="access_client_secret")
-            yield Label("(선택) X-Admin-Token")
-            yield Input(value=self.cfg.admin_token, password=True, placeholder="ADMIN_TOKEN", id="admin_token")
-            with Horizontal(classes="btn-row"):
-                yield Button("저장  [Enter]", variant="primary", id="save")
-                yield Button("취소  [Esc]", id="cancel")
-
-    @on(Button.Pressed, "#save")
-    def _save(self) -> None:
-        self._do_save()
-
-    @on(Input.Submitted)
-    def _input_submitted(self) -> None:
-        self._do_save()
-
-    def _do_save(self) -> None:
-        api_base_url = self.query_one("#api_base_url", Input).value.strip()
-        access_client_id = self.query_one("#access_client_id", Input).value.strip()
-        access_client_secret = self.query_one("#access_client_secret", Input).value.strip()
-        admin_token = self.query_one("#admin_token", Input).value.strip()
-
-        if not api_base_url or not api_base_url.startswith("http"):
-            self.app.bell()
-            return
-        if not access_client_id or not access_client_secret:
-            self.app.bell()
-            return
-
-        cfg = AppConfig(
-            api_base_url=api_base_url.rstrip("/"),
-            access_client_id=access_client_id,
-            access_client_secret=access_client_secret,
-            admin_token=admin_token,
-        )
-        save_config(cfg)
-        self.dismiss(cfg)
-
-    @on(Button.Pressed, "#cancel")
-    def _cancel_btn(self) -> None:
-        self.dismiss(None)
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
+@dataclass
+class ConfirmState:
+    action_key: str
+    target: str
+    until_s: float
 
 
-# ---------------------------------------------------------------------------
-# Modal: 범용 프롬프트 (생성/연장/수정 등)
-# ---------------------------------------------------------------------------
-class PromptScreen(ModalScreen[dict[str, str] | None]):
-    BINDINGS = [
-        Binding("escape", "cancel", "닫기", show=False),
-    ]
-
-    DEFAULT_CSS = """
-    PromptScreen {
-      align: center middle;
-    }
-    #card {
-      width: 80%;
-      max-width: 78;
-      max-height: 90%;
-      border: solid #2b2b2b;
-      padding: 1 2;
-      background: #101010;
-    }
-    #title {
-      text-style: bold;
-      margin: 0 0 1 0;
-    }
-    Input {
-      margin: 0 0 1 0;
-    }
-    .btn-row {
-      height: 3;
-      margin: 1 0 0 0;
-    }
-    .btn-row Button {
-      margin: 0 1 0 0;
-    }
-    """
-
-    def __init__(self, title: str, fields: list[tuple[str, str, bool]], initial: dict[str, str] | None = None) -> None:
-        super().__init__()
-        self._title = title
-        self._fields = fields
-        self._initial = initial or {}
-
-    def on_mount(self) -> None:
-        inputs = list(self.query(Input))
-        if inputs:
-            self.set_focus(inputs[0])
-
-    def compose(self) -> ComposeResult:
-        with VerticalScroll(id="card"):
-            yield Label(self._title, id="title")
-            for key, label, secret in self._fields:
-                yield Label(label)
-                yield Input(value=self._initial.get(key, ""), password=secret, id=key)
-            with Horizontal(classes="btn-row"):
-                yield Button("확인  [Enter]", variant="primary", id="ok")
-                yield Button("취소  [Esc]", id="cancel")
-
-    @on(Button.Pressed, "#ok")
-    def _ok_btn(self) -> None:
-        self._do_submit()
-
-    @on(Input.Submitted)
-    def _input_submitted(self, event: Input.Submitted) -> None:
-        inputs = list(self.query(Input))
-        if not inputs:
-            self._do_submit()
-            return
-
-        try:
-            idx = inputs.index(event.input)
-        except ValueError:
-            self._do_submit()
-            return
-
-        if idx < len(inputs) - 1:
-            self.set_focus(inputs[idx + 1])
-            return
-
-        self._do_submit()
-
-    def _do_submit(self) -> None:
-        out: dict[str, str] = {}
-        for key, _label, _secret in self._fields:
-            out[key] = self.query_one(f"#{key}", Input).value.strip()
-        self.dismiss(out)
-
-    @on(Button.Pressed, "#cancel")
-    def _cancel_btn(self) -> None:
-        self.dismiss(None)
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-
-# ---------------------------------------------------------------------------
-# Modal: 확인 다이얼로그 (삭제/폐기 등 위험 동작)
-# ---------------------------------------------------------------------------
-class ConfirmScreen(ModalScreen[bool]):
-    BINDINGS = [
-        Binding("escape", "cancel", "닫기", show=False),
-        Binding("enter", "confirm", "확인", show=False),
-    ]
-
-    DEFAULT_CSS = """
-    ConfirmScreen {
-      align: center middle;
-    }
-    #card {
-      width: 60%;
-      max-width: 60;
-      border: solid #2b2b2b;
-      padding: 1 2;
-      background: #101010;
-    }
-    #msg {
-      margin: 1 0;
-    }
-    .btn-row {
-      height: 3;
-      margin: 1 0 0 0;
-    }
-    .btn-row Button {
-      margin: 0 1 0 0;
-    }
-    """
-
-    def __init__(self, message: str) -> None:
-        super().__init__()
-        self._message = message
-
-    def compose(self) -> ComposeResult:
-        with Container(id="card"):
-            yield Label(self._message, id="msg")
-            with Horizontal(classes="btn-row"):
-                yield Button("확인  [Enter]", variant="error", id="yes")
-                yield Button("취소  [Esc]", id="no")
-
-    @on(Button.Pressed, "#yes")
-    def _yes(self) -> None:
-        self.dismiss(True)
-
-    @on(Button.Pressed, "#no")
-    def _no(self) -> None:
-        self.dismiss(False)
-
-    def action_confirm(self) -> None:
-        self.dismiss(True)
-
-    def action_cancel(self) -> None:
-        self.dismiss(False)
-
-
-class DataRefreshed(Message):
-    pass
-
-
-# ---------------------------------------------------------------------------
-# Main App
-# ---------------------------------------------------------------------------
 class JumpAdminTui(App):
-    CSS = """
-    #toast {
-      height: 1;
-      color: #cccccc;
-      background: #0f172a;
-      padding: 0 1;
+    """k9s 스타일의 단일 화면 TUI.
+
+    - 모달을 쓰지 않습니다.
+    - 하단 편집 패널에서 입력/저장합니다.
+    - 중요한 동작(삭제/폐기/정지)은 2회 확인(5초 내 재실행)으로 보호합니다.
+    """
+
+    CSS = r"""
+    Screen {
+      background: #0b0f19;
     }
-    DataTable {
+
+    #root {
+      padding: 1 1;
+    }
+
+    #bar {
+      height: auto;
+      margin: 0 0 1 0;
+    }
+
+    #bar Button {
+      margin: 0 1 0 0;
+    }
+
+    #split {
       height: 1fr;
     }
+
+    .panel {
+      border: solid #243042;
+      background: #0f172a;
+      padding: 1 1;
+    }
+
+    #toast {
+      height: 1;
+      color: #d1d5db;
+      background: #111827;
+      padding: 0 1;
+    }
+
+    DataTable {
+      height: 1fr;
+      background: #0b1220;
+    }
+
+    #detail {
+      width: 48;
+      min-width: 40;
+      background: #0b1220;
+    }
+
+    #detail_title {
+      text-style: bold;
+      margin: 0 0 1 0;
+    }
+
+    #edit {
+      margin: 1 0 1 0;
+      height: auto;
+    }
+
+    #edit_title {
+      text-style: bold;
+      margin: 0 0 1 0;
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    .field_label {
+      margin: 0 0 0 0;
+      color: #cbd5e1;
+    }
+
+    .field_input {
+      margin: 0 0 1 0;
+    }
+
+    .row {
+      height: auto;
+      margin: 1 0 0 0;
+    }
+
+    .row Button {
+      margin: 0 1 0 0;
+    }
     """
 
     BINDINGS = [
-        Binding("q", "quit", "종료"),
-        Binding("r", "refresh", "새로고침"),
-        Binding("c", "config", "설정"),
-        Binding("n", "license_new", "라이센스 생성"),
-        Binding("e", "license_extend", "기간 연장"),
-        Binding("s", "license_toggle_suspend", "정지/해제"),
-        Binding("x", "license_revoke", "폐기"),
-        Binding("shift+e", "domain_edit", "도메인 수정"),
-        Binding("E", "domain_edit", show=False),
-        Binding("d", "domain_delete", "도메인 삭제"),
+        Binding("q", "quit", "종료", priority=True),
+        Binding("r", "refresh", "새로고침", priority=True),
+        Binding("1", "view_licenses", "라이센스", priority=True),
+        Binding("2", "view_domains", "도메인", priority=True),
+        Binding("c", "open_config", "설정", priority=True),
+        Binding("n", "license_new", "라이센스 생성", priority=True),
+        Binding("e", "primary", "기본 동작", priority=True),
+        Binding("s", "license_toggle", "정지/해제", priority=True),
+        Binding("x", "license_revoke", "폐기", priority=True),
+        Binding("d", "domain_delete", "도메인 삭제", priority=True),
+        Binding("escape", "edit_cancel", "취소", show=False, priority=True),
+        Binding("ctrl+s", "edit_submit", "저장", show=False, priority=True),
     ]
-
-    _GLOBAL_ACTION_KEYS = {
-        "quit",
-        "refresh",
-        "config",
-        "license_new",
-        "license_extend",
-        "license_toggle_suspend",
-        "license_revoke",
-        "domain_edit",
-        "domain_delete",
-    }
 
     def __init__(self) -> None:
         super().__init__()
-        self.cfg = load_config()
+        self.cfg: AppConfig = load_config()
         self.api: JumpAdminApi | None = None
+
         self.toast = Toast("", id="toast")
 
+        self._edit_mode: str = ""  # config|license_new|license_extend|domain_edit
+        self._edit_ctx: dict[str, Any] = {}
+        self._pending_confirm: ConfirmState | None = None
+
+        self._licenses: list[dict[str, Any]] = []
+        self._domains: list[dict[str, Any]] = []
+
+    # -------------------------
+    # UI
+    # -------------------------
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        with Container():
-            with TabbedContent():
-                with TabPane("라이센스", id="tab_licenses"):
-                    yield self._licenses_view()
-                with TabPane("플랫폼 도메인", id="tab_domains"):
-                    yield self._domains_view()
+        with Container(id="root"):
+            with Horizontal(id="bar"):
+                yield Button("새로고침[r]", id="btn_refresh", variant="primary")
+                yield Button("설정[c]", id="btn_config")
+                yield Button("라이센스[1]", id="btn_view_licenses")
+                yield Button("도메인[2]", id="btn_view_domains")
+                yield Button("생성[n]", id="btn_license_new")
+                yield Button("기본[e]", id="btn_primary")
+                yield Button("정지/해제[s]", id="btn_license_toggle")
+                yield Button("폐기[x]", id="btn_license_revoke", variant="warning")
+                yield Button("삭제[d]", id="btn_domain_delete", variant="warning")
+
+            with Horizontal(id="split"):
+                with TabbedContent(id="tabs"):
+                    with TabPane("라이센스", id="tab_licenses"):
+                        yield self._make_licenses_table()
+                    with TabPane("플랫폼 도메인", id="tab_domains"):
+                        yield self._make_domains_table()
+
+                with Container(id="detail", classes="panel"):
+                    yield Label("상세", id="detail_title")
+                    yield Static("-", id="detail_body")
+
+            with Container(id="edit", classes="panel hidden"):
+                yield Label("편집", id="edit_title")
+
+                # fields
+                for key, label, secret in self._field_defs():
+                    yield Label(label, id=f"lbl_{key}", classes="field_label hidden")
+                    yield Input(id=f"in_{key}", password=secret, classes="field_input hidden")
+
+                with Horizontal(classes="row"):
+                    yield Button("저장[Ctrl+S/Enter]", id="btn_edit_submit", variant="primary")
+                    yield Button("취소[Esc]", id="btn_edit_cancel")
+
             yield self.toast
         yield Footer()
 
-    def _licenses_view(self) -> DataTable:
-        table = DataTable(id="licenses_table", zebra_stripes=True)
-        table.add_columns("ID", "업체명", "상태", "만료", "생성", "키 Prefix", "메모")
+    def _make_licenses_table(self) -> DataTable:
+        table = DataTable(id="licenses", zebra_stripes=True)
+        table.cursor_type = "row"
+        table.show_cursor = True
+        table.add_columns("ID", "업체명", "상태", "만료", "생성", "Prefix", "메모")
         return table
 
-    def _domains_view(self) -> DataTable:
-        table = DataTable(id="domains_table", zebra_stripes=True)
+    def _make_domains_table(self) -> DataTable:
+        table = DataTable(id="domains", zebra_stripes=True)
+        table.cursor_type = "row"
+        table.show_cursor = True
         table.add_columns("사이트", "도메인", "업데이트")
         return table
 
-    def _active_tab_id(self) -> str:
-        try:
-            tabs = self.query_one(TabbedContent)
-            return str(getattr(tabs, "active", "") or "")
-        except Exception:
-            return ""
+    @staticmethod
+    def _field_defs() -> list[tuple[str, str, bool]]:
+        return [
+            ("company_name", "업체명", False),
+            ("days", "일수", False),
+            ("note", "메모(선택)", False),
+            ("domain", "도메인", False),
+            ("api_base_url", "API 기본 URL", False),
+            ("access_client_id", "CF-Access-Client-Id", False),
+            ("access_client_secret", "CF-Access-Client-Secret", True),
+            ("admin_token", "(선택) X-Admin-Token", True),
+        ]
 
-    def _is_modal_open(self) -> bool:
-        return isinstance(self.screen, (ConfigScreen, PromptScreen, ConfirmScreen))
+    # -------------------------
+    # Focus / context helpers
+    # -------------------------
+    def _tabs(self) -> TabbedContent:
+        return self.query_one("#tabs", TabbedContent)
 
-    def _is_input_focused(self) -> bool:
+    def _active_tab(self) -> str:
+        return str(getattr(self._tabs(), "active", "") or "")
+
+    def _is_edit_open(self) -> bool:
+        return bool(self._edit_mode)
+
+    def _any_input_focused(self) -> bool:
         return isinstance(self.focused, Input)
 
-    def _suspend_global_actions(self) -> bool:
-        return self._is_modal_open() or self._is_input_focused()
+    def _suspend_global(self) -> bool:
+        return self._is_edit_open() or self._any_input_focused()
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        if action in self._GLOBAL_ACTION_KEYS and self._suspend_global_actions():
+        # 편집 중에는 저장/취소만 허용
+        if self._is_edit_open() and action not in {"edit_submit", "edit_cancel", "quit"}:
+            return False
+        # Input에 포커스가 있으면(편집 패널 포함) 핫키를 입력으로 취급
+        if self._any_input_focused() and action not in {"edit_submit", "edit_cancel", "quit"}:
             return False
         return None
 
-    # ---- Modal helper (callback-based, compatible with 0.85.x) ----
-    async def _show_modal(self, screen: ModalScreen) -> Any:
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[Any] = loop.create_future()
+    def on_key(self, event: Key) -> None:
+        # DataTable이 일부 키를 먹는 환경에서도 동작하도록, 앱 레벨에서 한번 더 라우팅
+        if self._suspend_global():
+            return
+        key = event.key
+        mapping: dict[str, str] = {
+            "q": "quit",
+            "r": "refresh",
+            "1": "view_licenses",
+            "2": "view_domains",
+            "c": "open_config",
+            "n": "license_new",
+            "e": "primary",
+            "s": "license_toggle",
+            "x": "license_revoke",
+            "d": "domain_delete",
+        }
+        action_name = mapping.get(key)
+        if not action_name:
+            return
+        event.stop()
+        self.run_worker(self._dispatch_action(action_name), name=f"hotkey:{action_name}", thread=False)
 
-        def _on_dismiss(result: Any) -> None:
-            if not future.done():
-                future.set_result(result)
+    async def _dispatch_action(self, action_name: str) -> None:
+        fn = getattr(self, f"action_{action_name}", None)
+        if fn is None:
+            return
+        result = fn()
+        if asyncio.iscoroutine(result):
+            await result
 
-        self.push_screen(screen, callback=_on_dismiss)
-        return await future
-
-    async def _confirm(self, message: str) -> bool:
-        result = await self._show_modal(ConfirmScreen(message))
-        return bool(result)
-
-    # ---- API setup ----
+    # -------------------------
+    # Lifecycle
+    # -------------------------
     async def on_mount(self) -> None:
+        self._close_edit()
         await self._ensure_api()
         await self.action_refresh()
 
     async def _ensure_api(self) -> None:
         if not (self.cfg.api_base_url and self.cfg.access_client_id and self.cfg.access_client_secret):
-            cfg = await self._show_modal(ConfigScreen(self.cfg))
-            if cfg is not None:
-                self.cfg = cfg
-            else:
-                return
+            self.api = None
+            self.toast.show("설정이 필요합니다. [c]를 눌러 설정을 입력하세요.")
+            return
 
         self.api = JumpAdminApi(
             AdminApiConfig(
@@ -411,19 +310,15 @@ class JumpAdminTui(App):
                 admin_token=self.cfg.admin_token,
             )
         )
-
         try:
             await asyncio.to_thread(self.api.health)
             self.toast.show("연결됨")
         except Exception as exc:
             self.toast.show(f"연결 실패: {exc}")
 
-    async def action_config(self) -> None:
-        cfg = await self._show_modal(ConfigScreen(self.cfg))
-        if cfg is not None:
-            self.cfg = cfg
-            await self._ensure_api()
-
+    # -------------------------
+    # Data load & render
+    # -------------------------
     async def action_refresh(self) -> None:
         if not self.api:
             await self._ensure_api()
@@ -432,8 +327,10 @@ class JumpAdminTui(App):
 
         self.toast.show("불러오는 중...")
         try:
-            licenses = await asyncio.to_thread(self.api.list_licenses)
-            domains = await asyncio.to_thread(self.api.list_domains)
+            licenses, domains = await asyncio.gather(
+                asyncio.to_thread(self.api.list_licenses),
+                asyncio.to_thread(self.api.list_domains),
+            )
         except ApiError as exc:
             self.toast.show(f"오류: {exc} ({exc.status_code})")
             return
@@ -441,242 +338,482 @@ class JumpAdminTui(App):
             self.toast.show(f"오류: {exc}")
             return
 
-        lic_table = self.query_one("#licenses_table", DataTable)
+        self._licenses = list(licenses or [])
+        self._domains = list(domains or [])
+
+        lic_table = self.query_one("#licenses", DataTable)
         lic_table.clear()
-        for lic in licenses:
+        for lic in self._licenses:
+            lid = str(lic.get("id", ""))
             lic_table.add_row(
-                str(lic.get("id", "")),
+                lid,
                 str(lic.get("company_name", "")),
                 str(lic.get("status", "")),
                 _fmt_ts(lic.get("expires_at")),
                 _fmt_ts(lic.get("created_at")),
                 str(lic.get("key_prefix", "")),
                 str(lic.get("note", "")),
-                key=str(lic.get("id", "")),
+                key=lid,
             )
 
-        dom_table = self.query_one("#domains_table", DataTable)
+        dom_table = self.query_one("#domains", DataTable)
         dom_table.clear()
-        for d in domains:
+        for dom in self._domains:
+            site_key = str(dom.get("site_key", ""))
             dom_table.add_row(
-                str(d.get("site_key", "")),
-                str(d.get("domain", "")),
-                _fmt_ts(d.get("updated_at")),
-                key=str(d.get("site_key", "")),
+                site_key,
+                str(dom.get("domain", "")),
+                _fmt_ts(dom.get("updated_at")),
+                key=site_key,
             )
 
+        # ensure cursor
+        if lic_table.row_count and (lic_table.cursor_row < 0 or lic_table.cursor_row >= lic_table.row_count):
+            lic_table.move_cursor(row=0, column=0, animate=False, scroll=False)
+        if dom_table.row_count and (dom_table.cursor_row < 0 or dom_table.cursor_row >= dom_table.row_count):
+            dom_table.move_cursor(row=0, column=0, animate=False, scroll=False)
+
+        self._update_detail_from_focus()
         self.toast.show("완료")
-        self.post_message(DataRefreshed())
 
-    # ---- Selection helpers ----
-    def _selected_license_id(self) -> int | None:
-        table = self.query_one("#licenses_table", DataTable)
-        if table.row_count == 0:
-            return None
-        row_index = table.cursor_row
-        if row_index < 0 or row_index >= table.row_count:
-            return None
-        row = table.get_row_at(row_index)
+    def _update_detail_from_focus(self) -> None:
+        detail = self.query_one("#detail_body", Static)
+        tab = self._active_tab()
+        if tab == "tab_domains":
+            table = self.query_one("#domains", DataTable)
+            if table.row_count <= 0 or table.cursor_row < 0:
+                detail.update("도메인 데이터가 없습니다.")
+                return
+            row = table.get_row_at(table.cursor_row)
+            site_key = str(row[0]) if len(row) > 0 else ""
+            dom = str(row[1]) if len(row) > 1 else ""
+            updated = str(row[2]) if len(row) > 2 else ""
+            detail.update(
+                "\n".join(
+                    [
+                        f"사이트: {site_key}",
+                        f"도메인: {dom}",
+                        f"업데이트: {updated}",
+                        "",
+                        "[키] e=수정, d=삭제(2회), r=새로고침",
+                    ]
+                )
+            )
+            return
+
+        table = self.query_one("#licenses", DataTable)
+        if table.row_count <= 0 or table.cursor_row < 0:
+            detail.update("라이센스 데이터가 없습니다.")
+            return
+        row = table.get_row_at(table.cursor_row)
+        detail.update(
+            "\n".join(
+                [
+                    f"ID: {row[0]}",
+                    f"업체명: {row[1]}",
+                    f"상태: {row[2]}",
+                    f"만료: {row[3]}",
+                    f"생성: {row[4]}",
+                    f"Prefix: {row[5]}",
+                    f"메모: {row[6]}",
+                    "",
+                    "[키] n=생성, e=연장, s=정지/해제(2회), x=폐기(2회)",
+                ]
+            )
+        )
+
+    # selection events
+    @on(DataTable.RowHighlighted)
+    def _on_row_highlighted(self) -> None:
+        self._update_detail_from_focus()
+
+    @on(TabbedContent.TabActivated)
+    def _on_tab_activated(self) -> None:
+        self._update_detail_from_focus()
+
+    # -------------------------
+    # Edit panel
+    # -------------------------
+    def _hide_all_fields(self) -> None:
+        for key, _label, _secret in self._field_defs():
+            self.query_one(f"#lbl_{key}", Label).add_class("hidden")
+            self.query_one(f"#in_{key}", Input).add_class("hidden")
+
+    def _show_fields(self, keys: list[str]) -> None:
+        for key in keys:
+            self.query_one(f"#lbl_{key}", Label).remove_class("hidden")
+            self.query_one(f"#in_{key}", Input).remove_class("hidden")
+
+    def _clear_fields(self) -> None:
+        for key, _label, _secret in self._field_defs():
+            self.query_one(f"#in_{key}", Input).value = ""
+
+    def _open_edit(self, mode: str, *, title: str, fields: list[str], defaults: dict[str, str] | None = None, ctx: dict[str, Any] | None = None) -> None:
+        self._edit_mode = mode
+        self._edit_ctx = ctx or {}
+        edit = self.query_one("#edit", Container)
+        edit.remove_class("hidden")
+        self.query_one("#edit_title", Label).update(title)
+        self._hide_all_fields()
+        self._clear_fields()
+        self._show_fields(fields)
+        for k, v in (defaults or {}).items():
+            self.query_one(f"#in_{k}", Input).value = v
+        if fields:
+            self.call_after_refresh(lambda: self.set_focus(self.query_one(f"#in_{fields[0]}", Input)))
+
+    def _close_edit(self) -> None:
+        self._edit_mode = ""
+        self._edit_ctx = {}
+        self._pending_confirm = None
+        self._clear_fields()
+        self._hide_all_fields()
+        self.query_one("#edit", Container).add_class("hidden")
+
+    def _visible_inputs(self) -> list[Input]:
+        inputs: list[Input] = []
+        for key, _label, _secret in self._field_defs():
+            inp = self.query_one(f"#in_{key}", Input)
+            if not inp.has_class("hidden"):
+                inputs.append(inp)
+        return inputs
+
+    @on(Input.Submitted)
+    async def _on_edit_input_submitted(self, event: Input.Submitted) -> None:
+        if not event.input.id or not event.input.id.startswith("in_"):
+            return
+        if not self._is_edit_open():
+            return
+        visible = self._visible_inputs()
         try:
-            return int(str(row[0]))
-        except Exception:
-            return None
-
-    def _selected_license_status(self) -> str:
-        table = self.query_one("#licenses_table", DataTable)
-        if table.row_count == 0:
-            return ""
-        row_index = table.cursor_row
-        if row_index < 0 or row_index >= table.row_count:
-            return ""
-        row = table.get_row_at(row_index)
-        return str(row[2]) if len(row) >= 3 else ""
-
-    def _selected_domain_site_key(self) -> str | None:
-        table = self.query_one("#domains_table", DataTable)
-        if table.row_count == 0:
-            return None
-        row_index = table.cursor_row
-        if row_index < 0 or row_index >= table.row_count:
-            return None
-        row = table.get_row_at(row_index)
-        return str(row[0]) if len(row) >= 1 else None
-
-    # ---- License actions ----
-    async def action_license_new(self) -> None:
-        if self._suspend_global_actions():
-            return
-        if not self.api:
-            return
-        fields = [
-            ("company_name", "업체명", False),
-            ("days", "유효기간(일)", False),
-            ("note", "메모(선택)", False),
-        ]
-        data = await self._show_modal(PromptScreen("라이센스 생성", fields, initial={"days": "30"}))
-        if data is None:
-            return
-        company = data.get("company_name", "").strip()
-        days_s = data.get("days", "").strip()
-        note = data.get("note", "").strip()
-        if not company:
-            self.toast.show("업체명을 입력하세요.")
-            return
-        try:
-            days = int(days_s)
+            idx = visible.index(event.input)
         except ValueError:
-            self.toast.show("유효기간은 숫자여야 합니다.")
+            idx = -1
+        if idx >= 0 and idx < len(visible) - 1:
+            self.set_focus(visible[idx + 1])
             return
+        await self.action_edit_submit()
 
-        self.toast.show("생성 중...")
-        try:
-            resp = await asyncio.to_thread(self.api.create_license, company, days, note)
-        except ApiError as exc:
-            self.toast.show(f"오류: {exc} ({exc.status_code})")
+    @on(Button.Pressed)
+    async def _on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = event.button.id or ""
+        mapping = {
+            "btn_refresh": "refresh",
+            "btn_config": "open_config",
+            "btn_view_licenses": "view_licenses",
+            "btn_view_domains": "view_domains",
+            "btn_license_new": "license_new",
+            "btn_primary": "primary",
+            "btn_license_toggle": "license_toggle",
+            "btn_license_revoke": "license_revoke",
+            "btn_domain_delete": "domain_delete",
+            "btn_edit_submit": "edit_submit",
+            "btn_edit_cancel": "edit_cancel",
+        }
+        action_name = mapping.get(bid)
+        if not action_name:
             return
-        except Exception as exc:
-            self.toast.show(f"오류: {exc}")
-            return
+        await self._dispatch_action(action_name)
 
-        key = (resp or {}).get("license_key") or ""
-        self.toast.show(f"생성됨. 라이센스 키(1회): {key}")
-        await self.action_refresh()
+    # -------------------------
+    # Confirm (2-step)
+    # -------------------------
+    def _confirm_twice(self, action_key: str, target: str) -> bool:
+        now = monotonic()
+        if self._pending_confirm and self._pending_confirm.action_key == action_key and self._pending_confirm.target == target:
+            if now <= self._pending_confirm.until_s:
+                self._pending_confirm = None
+                return True
+        self._pending_confirm = ConfirmState(action_key=action_key, target=target, until_s=now + 5.0)
+        self.toast.show("확인 필요: 5초 내 같은 명령을 한 번 더 실행하세요.")
+        return False
+
+    # -------------------------
+    # Actions: view
+    # -------------------------
+    async def action_view_licenses(self) -> None:
+        self._tabs().active = "tab_licenses"
+        self._update_detail_from_focus()
+
+    async def action_view_domains(self) -> None:
+        self._tabs().active = "tab_domains"
+        self._update_detail_from_focus()
+
+    # -------------------------
+    # Actions: open edit modes
+    # -------------------------
+    async def action_open_config(self) -> None:
+        self._open_edit(
+            "config",
+            title="설정",
+            fields=["api_base_url", "access_client_id", "access_client_secret", "admin_token"],
+            defaults={
+                "api_base_url": self.cfg.api_base_url,
+                "access_client_id": self.cfg.access_client_id,
+                "access_client_secret": self.cfg.access_client_secret,
+                "admin_token": self.cfg.admin_token,
+            },
+        )
+
+    async def action_license_new(self) -> None:
+        self._open_edit(
+            "license_new",
+            title="라이센스 생성",
+            fields=["company_name", "days", "note"],
+            defaults={"days": "30"},
+        )
+
+    async def action_primary(self) -> None:
+        # context-sensitive
+        if self._active_tab() == "tab_domains":
+            await self.action_domain_edit()
+        else:
+            await self.action_license_extend()
 
     async def action_license_extend(self) -> None:
-        if self._suspend_global_actions():
-            return
-        if not self.api:
-            return
-
-        # UX fallback: domains 탭에서는 `e` 키로 도메인 수정 동작
-        if self._active_tab_id() == "tab_domains":
-            await self.action_domain_edit()
-            return
-
-        license_id = self._selected_license_id()
-        if not license_id:
+        table = self.query_one("#licenses", DataTable)
+        if table.row_count <= 0 or table.cursor_row < 0:
             self.toast.show("선택된 라이센스가 없습니다.")
             return
-        data = await self._show_modal(
-            PromptScreen("기간 연장", [("days", "추가 일수", False)], initial={"days": "30"})
+        row = table.get_row_at(table.cursor_row)
+        license_id = str(row[0])
+        self._open_edit(
+            "license_extend",
+            title=f"기간 연장 (라이센스 #{license_id})",
+            fields=["days"],
+            defaults={"days": "30"},
+            ctx={"license_id": int(license_id) if license_id.isdigit() else license_id},
         )
-        if data is None:
+
+    async def action_domain_edit(self) -> None:
+        table = self.query_one("#domains", DataTable)
+        if table.row_count <= 0 or table.cursor_row < 0:
+            self.toast.show("선택된 사이트가 없습니다.")
             return
-        try:
-            days = int(data.get("days", "0"))
-        except ValueError:
-            self.toast.show("일수는 숫자여야 합니다.")
+        row = table.get_row_at(table.cursor_row)
+        site_key = str(row[0])
+        domain = str(row[1]) if len(row) > 1 else ""
+        self._open_edit(
+            "domain_edit",
+            title=f"도메인 수정 ({site_key})",
+            fields=["domain"],
+            defaults={"domain": domain},
+            ctx={"site_key": site_key},
+        )
+
+    # -------------------------
+    # Actions: submit/cancel edit
+    # -------------------------
+    async def action_edit_cancel(self) -> None:
+        if not self._is_edit_open():
+            return
+        self._close_edit()
+        self.toast.show("취소")
+
+    async def action_edit_submit(self) -> None:
+        if not self._is_edit_open():
+            return
+        mode = self._edit_mode
+
+        if mode == "config":
+            api_base_url = self.query_one("#in_api_base_url", Input).value.strip()
+            access_client_id = self.query_one("#in_access_client_id", Input).value.strip()
+            access_client_secret = self.query_one("#in_access_client_secret", Input).value.strip()
+            admin_token = self.query_one("#in_admin_token", Input).value.strip()
+
+            if not api_base_url or not api_base_url.startswith("http"):
+                self.toast.show("API 기본 URL이 올바르지 않습니다.")
+                return
+            if not access_client_id or not access_client_secret:
+                self.toast.show("CF Access ID/Secret을 입력하세요.")
+                return
+
+            self.cfg = AppConfig(
+                api_base_url=api_base_url.rstrip("/"),
+                access_client_id=access_client_id,
+                access_client_secret=access_client_secret,
+                admin_token=admin_token,
+            )
+            save_config(self.cfg)
+            self._close_edit()
+            await self._ensure_api()
+            await self.action_refresh()
             return
 
-        self.toast.show("연장 중...")
-        try:
-            await asyncio.to_thread(self.api.extend_license, license_id, days)
-        except ApiError as exc:
-            self.toast.show(f"오류: {exc} ({exc.status_code})")
-            return
-        except Exception as exc:
-            self.toast.show(f"오류: {exc}")
-            return
-        self.toast.show("완료")
-        await self.action_refresh()
-
-    async def action_license_toggle_suspend(self) -> None:
-        if self._suspend_global_actions():
-            return
+        if not self.api:
+            await self._ensure_api()
         if not self.api:
             return
-        license_id = self._selected_license_id()
-        if not license_id:
+
+        if mode == "license_new":
+            company = self.query_one("#in_company_name", Input).value.strip()
+            days_s = self.query_one("#in_days", Input).value.strip()
+            note = self.query_one("#in_note", Input).value.strip()
+            if not company:
+                self.toast.show("업체명을 입력하세요.")
+                return
+            try:
+                days = int(days_s)
+            except ValueError:
+                self.toast.show("일수는 숫자여야 합니다.")
+                return
+
+            self.toast.show("생성 중...")
+            try:
+                resp = await asyncio.to_thread(self.api.create_license, company, days, note)
+            except ApiError as exc:
+                self.toast.show(f"오류: {exc} ({exc.status_code})")
+                return
+            except Exception as exc:
+                self.toast.show(f"오류: {exc}")
+                return
+
+            key = (resp or {}).get("license_key") or ""
+            self._close_edit()
+            self.toast.show(f"생성 완료. 라이센스 키(1회): {key}")
+            await self.action_refresh()
+            return
+
+        if mode == "license_extend":
+            days_s = self.query_one("#in_days", Input).value.strip()
+            try:
+                days = int(days_s)
+            except ValueError:
+                self.toast.show("일수는 숫자여야 합니다.")
+                return
+            license_id = self._edit_ctx.get("license_id")
+            if not license_id:
+                self.toast.show("선택된 라이센스가 없습니다.")
+                return
+
+            self.toast.show("연장 중...")
+            try:
+                await asyncio.to_thread(self.api.extend_license, int(license_id), days)
+            except ApiError as exc:
+                self.toast.show(f"오류: {exc} ({exc.status_code})")
+                return
+            except Exception as exc:
+                self.toast.show(f"오류: {exc}")
+                return
+
+            self._close_edit()
+            self.toast.show("연장 완료")
+            await self.action_refresh()
+            return
+
+        if mode == "domain_edit":
+            domain = self.query_one("#in_domain", Input).value.strip()
+            site_key = str(self._edit_ctx.get("site_key", "")).strip()
+            if not site_key:
+                self.toast.show("선택된 사이트가 없습니다.")
+                return
+            if not domain:
+                self.toast.show("도메인이 비어 있습니다.")
+                return
+
+            self.toast.show("저장 중...")
+            try:
+                await asyncio.to_thread(self.api.set_domain, site_key, domain)
+            except ApiError as exc:
+                self.toast.show(f"오류: {exc} ({exc.status_code})")
+                return
+            except Exception as exc:
+                self.toast.show(f"오류: {exc}")
+                return
+
+            self._close_edit()
+            self.toast.show("저장 완료")
+            await self.action_refresh()
+            return
+
+    # -------------------------
+    # Actions: license ops
+    # -------------------------
+    async def action_license_toggle(self) -> None:
+        if self._active_tab() != "tab_licenses":
+            self.toast.show("라이센스 탭에서만 사용할 수 있습니다.")
+            return
+        table = self.query_one("#licenses", DataTable)
+        if table.row_count <= 0 or table.cursor_row < 0:
             self.toast.show("선택된 라이센스가 없습니다.")
             return
-        status = self._selected_license_status().lower().strip()
-        action_name = "정지" if status == "active" else "정지 해제"
+        row = table.get_row_at(table.cursor_row)
+        lid = str(row[0])
+        status = str(row[2]).lower().strip()
+        if not self._confirm_twice("license_toggle", lid):
+            return
 
-        if not await self._confirm(f"라이센스 #{license_id} {action_name} 하시겠습니까?"):
+        if not self.api:
+            await self._ensure_api()
+        if not self.api:
             return
 
         self.toast.show("처리 중...")
         try:
             if status == "active":
-                await asyncio.to_thread(self.api.suspend_license, license_id)
+                await asyncio.to_thread(self.api.suspend_license, int(lid))
             else:
-                await asyncio.to_thread(self.api.resume_license, license_id)
+                await asyncio.to_thread(self.api.resume_license, int(lid))
         except ApiError as exc:
             self.toast.show(f"오류: {exc} ({exc.status_code})")
             return
         except Exception as exc:
             self.toast.show(f"오류: {exc}")
             return
+
         self.toast.show("완료")
         await self.action_refresh()
 
     async def action_license_revoke(self) -> None:
-        if self._suspend_global_actions():
+        if self._active_tab() != "tab_licenses":
+            self.toast.show("라이센스 탭에서만 사용할 수 있습니다.")
             return
-        if not self.api:
-            return
-        license_id = self._selected_license_id()
-        if not license_id:
+        table = self.query_one("#licenses", DataTable)
+        if table.row_count <= 0 or table.cursor_row < 0:
             self.toast.show("선택된 라이센스가 없습니다.")
             return
+        row = table.get_row_at(table.cursor_row)
+        lid = str(row[0])
+        if not self._confirm_twice("license_revoke", lid):
+            return
 
-        if not await self._confirm(f"라이센스 #{license_id} 을(를) 폐기하시겠습니까? (복구 불가)"):
+        if not self.api:
+            await self._ensure_api()
+        if not self.api:
             return
 
         self.toast.show("폐기 중...")
         try:
-            await asyncio.to_thread(self.api.revoke_license, license_id)
+            await asyncio.to_thread(self.api.revoke_license, int(lid))
         except ApiError as exc:
             self.toast.show(f"오류: {exc} ({exc.status_code})")
             return
         except Exception as exc:
             self.toast.show(f"오류: {exc}")
             return
+
         self.toast.show("완료")
         await self.action_refresh()
 
-    # ---- Domain actions ----
-    async def action_domain_edit(self) -> None:
-        if self._suspend_global_actions():
-            return
-        if not self.api:
-            return
-        site_key = self._selected_domain_site_key()
-        if not site_key:
-            self.toast.show("선택된 사이트가 없습니다.")
-            return
-        data = await self._show_modal(
-            PromptScreen("도메인 수정", [("domain", f"{site_key} 도메인", False)])
-        )
-        if data is None:
-            return
-        domain = data.get("domain", "").strip()
-        if not domain:
-            self.toast.show("도메인이 비어 있습니다.")
-            return
-        self.toast.show("저장 중...")
-        try:
-            await asyncio.to_thread(self.api.set_domain, site_key, domain)
-        except ApiError as exc:
-            self.toast.show(f"오류: {exc} ({exc.status_code})")
-            return
-        except Exception as exc:
-            self.toast.show(f"오류: {exc}")
-            return
-        self.toast.show("완료")
-        await self.action_refresh()
-
+    # -------------------------
+    # Actions: domain ops
+    # -------------------------
     async def action_domain_delete(self) -> None:
-        if self._suspend_global_actions():
+        if self._active_tab() != "tab_domains":
+            self.toast.show("도메인 탭에서만 사용할 수 있습니다.")
             return
-        if not self.api:
-            return
-        site_key = self._selected_domain_site_key()
-        if not site_key:
+        table = self.query_one("#domains", DataTable)
+        if table.row_count <= 0 or table.cursor_row < 0:
             self.toast.show("선택된 사이트가 없습니다.")
             return
+        row = table.get_row_at(table.cursor_row)
+        site_key = str(row[0])
+        if not self._confirm_twice("domain_delete", site_key):
+            return
 
-        if not await self._confirm(f"'{site_key}' 도메인을 삭제하시겠습니까?"):
+        if not self.api:
+            await self._ensure_api()
+        if not self.api:
             return
 
         self.toast.show("삭제 중...")
@@ -688,6 +825,7 @@ class JumpAdminTui(App):
         except Exception as exc:
             self.toast.show(f"오류: {exc}")
             return
+
         self.toast.show("완료")
         await self.action_refresh()
 
@@ -695,30 +833,22 @@ class JumpAdminTui(App):
 def run() -> None:
     import sys
 
-    # --diag flag: print terminal diagnostics and exit
-    if "--diag" in sys.argv:
-        print(f"TERM={os.environ.get('TERM', '(unset)')}")
-        print(f"COLORTERM={os.environ.get('COLORTERM', '(unset)')}")
-        print(f"TERM_PROGRAM={os.environ.get('TERM_PROGRAM', '(unset)')}")
-        print(f"NO_COLOR={os.environ.get('NO_COLOR', '(unset)')}")
-        print(f"stdout.isatty={sys.stdout.isatty()}")
-        print(f"stdin.isatty={sys.stdin.isatty()}")
-        print(f"textual version={__import__('textual').__version__}")
-        print("\n색상 테스트:")
-        print("\033[38;2;255;255;255;48;2;0;0;200m TrueColor 테스트 \033[0m ← 흰 글씨+파란 배경이 보여야 합니다")
-        print("\033[38;5;15;48;5;21m 256Color 테스트 \033[0m ← 흰 글씨+파란 배경이 보여야 합니다")
-        raise SystemExit(0)
-
+    # Force color in most terminals unless user explicitly disables
     os.environ.pop("NO_COLOR", None)
     if not os.environ.get("TERM"):
         os.environ["TERM"] = "xterm-256color"
+
+    # Diagnostics
+    if "--diag" in sys.argv:
+        print(f"TERM={os.environ.get('TERM','(unset)')}")
+        print(f"TERM_PROGRAM={os.environ.get('TERM_PROGRAM','(unset)')}")
+        print(f"stdout.isatty={sys.stdout.isatty()}")
+        print(f"stdin.isatty={sys.stdin.isatty()}")
+        print(f"textual={__import__('textual').__version__}")
+        raise SystemExit(0)
 
     if not sys.stdout.isatty():
         print("jump-admin-tui: stdout이 TTY가 아닙니다. 일반 터미널에서 실행해 주세요.", file=sys.stderr)
         raise SystemExit(1)
 
-    try:
-        JumpAdminTui().run()
-    except Exception as exc:
-        print(f"jump-admin-tui 오류: {exc}", file=sys.stderr)
-        raise SystemExit(1)
+    JumpAdminTui().run()
