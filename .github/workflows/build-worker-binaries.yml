@@ -64,14 +64,24 @@ jobs:
         run: |
           Set-Location jump_worker_dashboard
           powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
-          Compress-Archive -Path .\dist\jump-worker-dashboard\* -DestinationPath .\dist\jump-worker-dashboard-windows.zip -Force
 
-      - name: Upload Windows artifact
+      # Inno Setup 설치 및 인스톨러 생성 (Defender 예외 자동 등록)
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Build Inno Setup installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $iscc jump_worker_dashboard\installer\guardian-setup.iss /O"jump_worker_dashboard\dist" /Q
+
+      - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
           name: jump-worker-dashboard-windows
           path: |
-            jump_worker_dashboard/dist/jump-worker-dashboard-windows.zip
+            jump_worker_dashboard/dist/GUARDIAN_Jump_Setup.exe
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
