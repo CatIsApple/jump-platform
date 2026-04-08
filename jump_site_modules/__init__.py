@@ -19,6 +19,7 @@ from .custom.kakaotteok import KakaotteokSite
 from .custom.opmart import OpmartSite
 from .gnuboard.bamje import BamjeSite
 from .gnuboard.hellobam import HellobamSite
+from .gnuboard.indal import IndalSite
 from .gnuboard.lybam import LybamSite
 from .gnuboard.opguide import OpguideSite
 from .gnuboard.oplove import OploveSite
@@ -43,6 +44,7 @@ SITE_REGISTRY: dict[str, type[BaseSite]] = {
     "밤의민족": BamminjokSite,
     "오피마트": OpmartSite,
     "섹밤": SexbamSite,
+    "인천달리기": IndalSite,
 }
 
 
