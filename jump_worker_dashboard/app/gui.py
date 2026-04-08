@@ -1795,6 +1795,8 @@ class WorkerDashboardApp(ctk.CTk):
             placeholder_text="시",
         )
         self.entry_hour.pack(side="left")
+        self.entry_hour.bind("<FocusOut>", lambda e: self._clamp_time_input(self.var_hour, 1, 12))
+        self.entry_hour.bind("<Return>", lambda e: self._clamp_time_input(self.var_hour, 1, 12))
 
         ctk.CTkLabel(
             time_frame, text=":",
@@ -1816,6 +1818,8 @@ class WorkerDashboardApp(ctk.CTk):
             placeholder_text="분",
         )
         self.entry_minute.pack(side="left")
+        self.entry_minute.bind("<FocusOut>", lambda e: self._clamp_time_input(self.var_minute, 0, 59))
+        self.entry_minute.bind("<Return>", lambda e: self._clamp_time_input(self.var_minute, 0, 59))
 
         ctk.CTkButton(
             picker_row, text="+ 추가",
@@ -2187,6 +2191,19 @@ class WorkerDashboardApp(ctk.CTk):
 
         self._sync_browser_option()
         self._reload_workflow_list()
+
+    def _clamp_time_input(self, var: ctk.StringVar, lo: int, hi: int) -> None:
+        """입력값을 lo~hi 범위로 자동 클램프한다."""
+        raw = var.get().strip()
+        if not raw:
+            return
+        try:
+            val = int(raw)
+        except ValueError:
+            var.set(f"{lo:02d}")
+            return
+        clamped = max(lo, min(hi, val))
+        var.set(f"{clamped:02d}")
 
     def _set_ampm(self, value: str) -> None:
         self.var_ampm.set(value)
