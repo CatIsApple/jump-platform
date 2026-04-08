@@ -19,7 +19,7 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 ; 관리자 권한 필요 (Defender 예외 등록)
 PrivilegesRequired=admin
-SetupIconFile=
+SetupIconFile=..\assets\calendar.ico
 UninstallDisplayName={#AppName} 점프 프로그램
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
@@ -36,8 +36,8 @@ Name: "desktopicon"; Description: "바탕화면에 바로가기 만들기"; Grou
 Source: "..\dist\jump-worker-dashboard\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
-Name: "{autodesktop}\{#AppName} 점프 프로그램"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
+Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\assets\calendar.ico"
+Name: "{autodesktop}\{#AppName} 점프 프로그램"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\assets\calendar.ico"; Tasks: desktopicon
 Name: "{group}\{#AppName} 제거"; Filename: "{uninstallexe}"
 
 [Run]

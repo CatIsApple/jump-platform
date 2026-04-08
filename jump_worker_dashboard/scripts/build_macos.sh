@@ -36,6 +36,7 @@ pyinstaller \
   --clean \
   --windowed \
   --name "$APP_NAME" \
+  --icon "assets/calendar.ico" \
   --add-data "assets:assets" \
   --add-data "jump_site_modules:jump_site_modules" \
   --hidden-import=jump_site_modules \
