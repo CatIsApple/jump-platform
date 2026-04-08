@@ -1216,10 +1216,10 @@ class WorkerDashboardApp(ctk.CTk):
             bottom,
             text="로그아웃",
             height=STYLES["button_height"],
-            fg_color="#7f2a2a",
-            hover_color="#761b1b",
+            fg_color="#1a1212",
+            hover_color="#251414",
             border_width=1,
-            border_color="#3c1a1a",
+            border_color="#471c1c",
             corner_radius=STYLES["button_radius"],
             font=_font(13),
             text_color="#ef4444",
@@ -1755,9 +1755,30 @@ class WorkerDashboardApp(ctk.CTk):
         picker_row = ctk.CTkFrame(sched_card, fg_color="transparent")
         picker_row.pack(fill="x", padx=SP["lg"], pady=SP["md"])
 
+        # AM/PM toggle buttons
+        self.var_ampm = ctk.StringVar(value="오전")
+        ampm_frame = ctk.CTkFrame(picker_row, fg_color="transparent")
+        ampm_frame.pack(side="left")
+
+        self._btn_am = ctk.CTkButton(
+            ampm_frame, text="오전", width=44, height=30,
+            fg_color=COLORS["accent_soft"], hover_color=COLORS["accent_muted"],
+            corner_radius=6, font=_font(14), text_color=COLORS["accent"],
+            command=lambda: self._set_ampm("오전"),
+        )
+        self._btn_am.pack(side="left", padx=(0, 2))
+
+        self._btn_pm = ctk.CTkButton(
+            ampm_frame, text="오후", width=44, height=30,
+            fg_color="transparent", hover_color=COLORS["card_hover"],
+            corner_radius=6, font=_font(14), text_color=COLORS["text_4"],
+            command=lambda: self._set_ampm("오후"),
+        )
+        self._btn_pm.pack(side="left")
+
         # Hour : Minute input fields
         time_frame = ctk.CTkFrame(picker_row, fg_color="transparent")
-        time_frame.pack(side="left")
+        time_frame.pack(side="left", padx=(SP["lg"], 0))
 
         self.var_hour = ctk.StringVar(value="09")
         self.entry_hour = ctk.CTkEntry(
@@ -2167,14 +2188,24 @@ class WorkerDashboardApp(ctk.CTk):
         self._sync_browser_option()
         self._reload_workflow_list()
 
+    def _set_ampm(self, value: str) -> None:
+        self.var_ampm.set(value)
+        if value == "오전":
+            self._btn_am.configure(fg_color=COLORS["accent_soft"], text_color=COLORS["accent"])
+            self._btn_pm.configure(fg_color="transparent", text_color=COLORS["text_4"])
+        else:
+            self._btn_pm.configure(fg_color=COLORS["accent_soft"], text_color=COLORS["accent"])
+            self._btn_am.configure(fg_color="transparent", text_color=COLORS["text_4"])
+
     def _add_schedule_token(self) -> None:
+        ampm = self.var_ampm.get()
         raw_hour = self.var_hour.get().strip()
         raw_minute = self.var_minute.get().strip()
 
         try:
-            hour = int(raw_hour)
+            hour_12 = int(raw_hour)
         except ValueError:
-            self.toast("시간을 숫자로 입력해주세요. (0-23)", "warning")
+            self.toast("시간을 숫자로 입력해주세요. (1-12)", "warning")
             return
         try:
             minute = int(raw_minute)
@@ -2182,14 +2213,20 @@ class WorkerDashboardApp(ctk.CTk):
             self.toast("분을 숫자로 입력해주세요. (0-59)", "warning")
             return
 
-        if hour < 0 or hour > 23:
-            self.toast("시간은 0~23 범위여야 합니다.", "warning")
+        if hour_12 < 1 or hour_12 > 12:
+            self.toast("시간은 1~12 범위여야 합니다.", "warning")
             return
         if minute < 0 or minute > 59:
             self.toast("분은 0~59 범위여야 합니다.", "warning")
             return
 
-        normalized = f"{hour:02d}:{minute:02d}:00"
+        # Convert 12h -> 24h
+        if ampm == "오전":
+            hour_24 = 0 if hour_12 == 12 else hour_12
+        else:
+            hour_24 = 12 if hour_12 == 12 else hour_12 + 12
+
+        normalized = f"{hour_24:02d}:{minute:02d}:00"
 
         if normalized in self._schedule_tokens:
             self.toast("이미 추가된 시간입니다.", "info")
