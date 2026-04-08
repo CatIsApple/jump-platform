@@ -1016,6 +1016,7 @@ class WorkerDashboardApp(ctk.CTk):
         save_platform_domains_full(full_mapping)
         changed = self._apply_domains_to_workflows(mapping)
 
+        self._refresh_site_option_menu()
         self._sync_domain_from_platform()
         self._reload_workflow_list()
         self._refresh_license_status_label()
@@ -1211,9 +1212,23 @@ class WorkerDashboardApp(ctk.CTk):
             command=self._open_artifacts_dir,
         ).pack(fill="x", padx=SP["sm"], pady=(0, SP["md"]))
 
+        ctk.CTkButton(
+            bottom,
+            text="로그아웃",
+            height=STYLES["button_height"],
+            fg_color="#ef444480",
+            hover_color="#dc262680",
+            border_width=1,
+            border_color="#ef444433",
+            corner_radius=STYLES["button_radius"],
+            font=_font(13),
+            text_color="#ef4444",
+            command=self._backend_logout,
+        ).pack(fill="x", padx=SP["sm"], pady=(0, SP["md"]))
+
         ctk.CTkLabel(
             bottom,
-            text="v0.2.0 by Da0nn",
+            text="v0.3.0 by Da0nn",
             font=_font(10),
             text_color=COLORS["text_4"],
         ).pack(anchor="w", padx=SP["sm"])
@@ -1662,7 +1677,7 @@ class WorkerDashboardApp(ctk.CTk):
         self._field_label(content, "사이트").grid(row=row, column=0, sticky="w", pady=field_pady, padx=label_padx)
         self.option_site = ctk.CTkOptionMenu(
             content,
-            values=SITE_KEYS,
+            values=self._get_synced_site_keys(),
             variable=self.var_site,
             command=self._on_site_selected,
             height=STYLES["entry_height"],
@@ -1679,7 +1694,7 @@ class WorkerDashboardApp(ctk.CTk):
         self.option_site.grid(row=row, column=1, sticky="ew", pady=field_pady)
         row += 1
 
-        self._field_label(content, "도메인(자동)").grid(row=row, column=0, sticky="w", pady=field_pady, padx=label_padx)
+        self._field_label(content, "도메인").grid(row=row, column=0, sticky="w", pady=field_pady, padx=label_padx)
 
         domain_row = ctk.CTkFrame(content, fg_color="transparent")
         domain_row.grid(row=row, column=1, sticky="ew", pady=field_pady)
@@ -1688,43 +1703,13 @@ class WorkerDashboardApp(ctk.CTk):
         self.entry_domain = self._make_entry(
             domain_row,
             textvariable=self.var_domain,
-            placeholder_text="플랫폼 선택 시 자동 입력됩니다. (백엔드 동기화/로컬 매핑)",
+            placeholder_text="서버 동기화 시 자동 설정됩니다.",
         )
         self.entry_domain.grid(row=0, column=0, sticky="ew")
         try:
             self.entry_domain.configure(state="disabled")
         except Exception:
             pass
-
-        ctk.CTkButton(
-            domain_row,
-            text="도메인 설정",
-            fg_color="transparent",
-            hover_color=COLORS["card_hover"],
-            border_width=1,
-            border_color=COLORS["border"],
-            corner_radius=STYLES["input_radius"],
-            font=_font(14),
-            text_color=COLORS["text_2"],
-            command=self._open_platform_domains,
-            width=96,
-            height=STYLES["entry_height"],
-        ).grid(row=0, column=1, padx=(SP["sm"], 0))
-
-        ctk.CTkButton(
-            domain_row,
-            text="서버 동기화",
-            fg_color="transparent",
-            hover_color=COLORS["card_hover"],
-            border_width=1,
-            border_color=COLORS["border"],
-            corner_radius=STYLES["input_radius"],
-            font=_font(14),
-            text_color=COLORS["text_2"],
-            command=self._sync_platform_domains_from_backend,
-            width=104,
-            height=STYLES["entry_height"],
-        ).grid(row=0, column=2, padx=(SP["sm"], 0))
         row += 1
 
         self._field_label(content, "상호명").grid(row=row, column=0, sticky="w", pady=field_pady, padx=label_padx)
@@ -1770,44 +1755,25 @@ class WorkerDashboardApp(ctk.CTk):
         picker_row = ctk.CTkFrame(sched_card, fg_color="transparent")
         picker_row.pack(fill="x", padx=SP["lg"], pady=SP["md"])
 
-        # AM/PM toggle buttons
-        self.var_ampm = ctk.StringVar(value="오전")
-        ampm_frame = ctk.CTkFrame(picker_row, fg_color="transparent")
-        ampm_frame.pack(side="left")
-
-        self._btn_am = ctk.CTkButton(
-            ampm_frame, text="오전", width=44, height=30,
-            fg_color=COLORS["accent_soft"], hover_color=COLORS["accent_muted"],
-            corner_radius=6, font=_font(14), text_color=COLORS["accent"],
-            command=lambda: self._set_ampm("오전"),
-        )
-        self._btn_am.pack(side="left", padx=(0, 2))
-
-        self._btn_pm = ctk.CTkButton(
-            ampm_frame, text="오후", width=44, height=30,
-            fg_color="transparent", hover_color=COLORS["card_hover"],
-            corner_radius=6, font=_font(14), text_color=COLORS["text_4"],
-            command=lambda: self._set_ampm("오후"),
-        )
-        self._btn_pm.pack(side="left")
-
-        # Hour : Minute
+        # Hour : Minute input fields
         time_frame = ctk.CTkFrame(picker_row, fg_color="transparent")
-        time_frame.pack(side="left", padx=(SP["lg"], 0))
+        time_frame.pack(side="left")
 
         self.var_hour = ctk.StringVar(value="09")
-        ctk.CTkOptionMenu(
+        self.entry_hour = ctk.CTkEntry(
             time_frame,
-            values=[f"{h:02d}" for h in range(1, 13)],
-            variable=self.var_hour,
-            width=64, height=32, corner_radius=6,
-            fg_color=COLORS["card"], button_color=COLORS["border"],
-            button_hover_color=COLORS["text_4"],
-            dropdown_fg_color=COLORS["card"],
-            dropdown_hover_color=COLORS["card_hover"],
-            dropdown_text_color=COLORS["text"],
-            text_color=COLORS["text"], font=_font(14, "bold"),
-        ).pack(side="left")
+            textvariable=self.var_hour,
+            width=56, height=32,
+            corner_radius=6,
+            fg_color=COLORS["card"],
+            border_color=COLORS["border"],
+            border_width=1,
+            text_color=COLORS["text"],
+            font=_font(14, "bold"),
+            justify="center",
+            placeholder_text="시",
+        )
+        self.entry_hour.pack(side="left")
 
         ctk.CTkLabel(
             time_frame, text=":",
@@ -1815,18 +1781,20 @@ class WorkerDashboardApp(ctk.CTk):
         ).pack(side="left", padx=4)
 
         self.var_minute = ctk.StringVar(value="00")
-        ctk.CTkOptionMenu(
+        self.entry_minute = ctk.CTkEntry(
             time_frame,
-            values=[f"{m:02d}" for m in range(60)],
-            variable=self.var_minute,
-            width=64, height=32, corner_radius=6,
-            fg_color=COLORS["card"], button_color=COLORS["border"],
-            button_hover_color=COLORS["text_4"],
-            dropdown_fg_color=COLORS["card"],
-            dropdown_hover_color=COLORS["card_hover"],
-            dropdown_text_color=COLORS["text"],
-            text_color=COLORS["text"], font=_font(14, "bold"),
-        ).pack(side="left")
+            textvariable=self.var_minute,
+            width=56, height=32,
+            corner_radius=6,
+            fg_color=COLORS["card"],
+            border_color=COLORS["border"],
+            border_width=1,
+            text_color=COLORS["text"],
+            font=_font(14, "bold"),
+            justify="center",
+            placeholder_text="분",
+        )
+        self.entry_minute.pack(side="left")
 
         ctk.CTkButton(
             picker_row, text="+ 추가",
@@ -1934,6 +1902,26 @@ class WorkerDashboardApp(ctk.CTk):
                 pass
 
         _bind_recursive(scrollable_frame)
+
+    def _get_synced_site_keys(self) -> list[str]:
+        """서버 동기화된 사이트만 반환 (도메인이 있고 활성화된 사이트)."""
+        full = load_platform_domains_full()
+        synced = [
+            k for k, v in full.items()
+            if v.get("domain", "").strip() and v.get("enabled", True)
+        ]
+        return synced if synced else SITE_KEYS[:1]
+
+    def _refresh_site_option_menu(self) -> None:
+        """서버 동기화 후 사이트 선택 목록을 갱신한다."""
+        try:
+            keys = self._get_synced_site_keys()
+            self.option_site.configure(values=keys)
+            if self.var_site.get() not in keys and keys:
+                self.var_site.set(keys[0])
+                self._on_site_selected()
+        except Exception:
+            pass
 
     def _on_site_selected(self, _value: str | None = None) -> None:
         self._sync_browser_option()
@@ -2179,35 +2167,29 @@ class WorkerDashboardApp(ctk.CTk):
         self._sync_browser_option()
         self._reload_workflow_list()
 
-    def _set_ampm(self, value: str) -> None:
-        self.var_ampm.set(value)
-        if value == "오전":
-            self._btn_am.configure(fg_color=COLORS["accent_soft"], text_color=COLORS["accent"])
-            self._btn_pm.configure(fg_color="transparent", text_color=COLORS["text_4"])
-        else:
-            self._btn_pm.configure(fg_color=COLORS["accent_soft"], text_color=COLORS["accent"])
-            self._btn_am.configure(fg_color="transparent", text_color=COLORS["text_4"])
-
     def _add_schedule_token(self) -> None:
-        ampm = self.var_ampm.get()
+        raw_hour = self.var_hour.get().strip()
+        raw_minute = self.var_minute.get().strip()
+
         try:
-            hour_12 = int(self.var_hour.get())
+            hour = int(raw_hour)
         except ValueError:
-            self.toast("시간을 선택해주세요.", "warning")
+            self.toast("시간을 숫자로 입력해주세요. (0-23)", "warning")
             return
         try:
-            minute = int(self.var_minute.get())
+            minute = int(raw_minute)
         except ValueError:
-            self.toast("분을 선택해주세요.", "warning")
+            self.toast("분을 숫자로 입력해주세요. (0-59)", "warning")
             return
 
-        # Convert 12h -> 24h
-        if ampm == "오전":
-            hour_24 = 0 if hour_12 == 12 else hour_12
-        else:
-            hour_24 = 12 if hour_12 == 12 else hour_12 + 12
+        if hour < 0 or hour > 23:
+            self.toast("시간은 0~23 범위여야 합니다.", "warning")
+            return
+        if minute < 0 or minute > 59:
+            self.toast("분은 0~59 범위여야 합니다.", "warning")
+            return
 
-        normalized = f"{hour_24:02d}:{minute:02d}:00"
+        normalized = f"{hour:02d}:{minute:02d}:00"
 
         if normalized in self._schedule_tokens:
             self.toast("이미 추가된 시간입니다.", "info")
@@ -2216,6 +2198,10 @@ class WorkerDashboardApp(ctk.CTk):
         self._schedule_tokens.append(normalized)
         self._schedule_tokens.sort()
         self._render_schedule_chips()
+
+        # 입력 필드 초기화
+        self.var_hour.set(f"{hour:02d}")
+        self.var_minute.set("00")
 
     def _render_schedule_chips(self) -> None:
         for child in self.schedule_chips.winfo_children():
@@ -2238,14 +2224,7 @@ class WorkerDashboardApp(ctk.CTk):
         for t in self._schedule_tokens:
             try:
                 hh, mm = int(t[:2]), int(t[3:5])
-                if hh == 0:
-                    display = f"오전 12:{mm:02d}"
-                elif hh < 12:
-                    display = f"오전 {hh}:{mm:02d}"
-                elif hh == 12:
-                    display = f"오후 12:{mm:02d}"
-                else:
-                    display = f"오후 {hh - 12}:{mm:02d}"
+                display = f"{hh:02d}:{mm:02d}"
             except Exception:
                 display = t
 
