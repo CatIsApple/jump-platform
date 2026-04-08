@@ -22,7 +22,8 @@ python -m pip install \
   "selenium>=4.20.0" \
   "beautifulsoup4>=4.12.0" \
   "brotli>=1.1.0" \
-  "pyinstaller>=6.10.0"
+  "pyinstaller>=6.10.0" \
+  "Pillow>=10.0.0"
 
 rm -rf "$BUILD_DIR" "$DIST_DIR/$APP_NAME" "$DIST_DIR/$APP_NAME.app"
 
