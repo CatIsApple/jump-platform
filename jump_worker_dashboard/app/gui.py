@@ -1216,10 +1216,10 @@ class WorkerDashboardApp(ctk.CTk):
             bottom,
             text="로그아웃",
             height=STYLES["button_height"],
-            fg_color="#1a1212",
-            hover_color="#251414",
+            fg_color="#251414",
+            hover_color="#3b1a1a",
             border_width=1,
-            border_color="#471c1c",
+            border_color="#3c1a1a",
             corner_radius=STYLES["button_radius"],
             font=_font(13),
             text_color="#ef4444",
@@ -2205,20 +2205,19 @@ class WorkerDashboardApp(ctk.CTk):
         try:
             hour_12 = int(raw_hour)
         except ValueError:
-            self.toast("시간을 숫자로 입력해주세요. (1-12)", "warning")
+            self.toast("시간을 숫자로 입력해주세요.", "warning")
             return
         try:
             minute = int(raw_minute)
         except ValueError:
-            self.toast("분을 숫자로 입력해주세요. (0-59)", "warning")
+            self.toast("분을 숫자로 입력해주세요.", "warning")
             return
 
-        if hour_12 < 1 or hour_12 > 12:
-            self.toast("시간은 1~12 범위여야 합니다.", "warning")
-            return
-        if minute < 0 or minute > 59:
-            self.toast("분은 0~59 범위여야 합니다.", "warning")
-            return
+        # 범위 초과 시 자동 클램프
+        hour_12 = max(1, min(12, hour_12))
+        minute = max(0, min(59, minute))
+        self.var_hour.set(f"{hour_12:02d}")
+        self.var_minute.set(f"{minute:02d}")
 
         # Convert 12h -> 24h
         if ampm == "오전":
