@@ -18,6 +18,7 @@ if (!(Test-Path $VENV_DIR)) {
   "selenium>=4.20.0" `
   "beautifulsoup4>=4.12.0" `
   "brotli>=1.1.0" `
+  "2captcha-python>=1.2.0" `
   "pyinstaller>=6.10.0"
 
 if (Test-Path "build") { Remove-Item -Recurse -Force "build" }
@@ -43,6 +44,13 @@ if (!(Test-Path "jump_site_modules") -and (Test-Path "..\jump_site_modules")) {
   --hidden-import=jump_site_modules.gnuboard_base `
   --hidden-import=jump_site_modules.types `
   --collect-submodules=jump_site_modules `
+  --collect-submodules=selenium `
+  --hidden-import=selenium.webdriver.chrome.webdriver `
+  --hidden-import=selenium.webdriver.chrome.service `
+  --hidden-import=selenium.webdriver.chrome.options `
+  --hidden-import=selenium.webdriver.common.by `
+  --hidden-import=selenium.webdriver.support.ui `
+  --hidden-import=selenium.webdriver.support.expected_conditions `
   main.py
 
 Write-Host "빌드 완료: dist\$APP_NAME"

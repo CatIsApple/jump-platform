@@ -24,13 +24,13 @@ class IndalSite(GnuboardSite):
     SITE_NAME = "인천달리기"
 
     COOKIE_KEYS = ["PHPSESSID"]
-    LOGIN_URL_PATH = "/bbs/login.php"
+    LOGIN_URL_PATH = "/"
     LOGIN_CHECK_TEXT = "로그아웃"
     LOGIN_ID_SELECTOR = "input[name='mb_id']"
     LOGIN_PW_SELECTOR = "input[name='mb_password']"
     LOGIN_SUBMIT_SELECTOR = "button[type='submit'].btn-red"
     LOGIN_PRE_SUBMIT_DELAY = 0.5
-    LOGIN_POST_SUBMIT_DELAY = 1.5
+    LOGIN_POST_SUBMIT_DELAY = 2.0
 
     # ── Login hook: 로그인 후 "환영합니다!" alert 처리 ──
 

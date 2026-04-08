@@ -22,6 +22,7 @@ python -m pip install \
   "selenium>=4.20.0" \
   "beautifulsoup4>=4.12.0" \
   "brotli>=1.1.0" \
+  "2captcha-python>=1.2.0" \
   "pyinstaller>=6.10.0" \
   "Pillow>=10.0.0"
 
@@ -46,6 +47,13 @@ pyinstaller \
   --hidden-import=jump_site_modules.gnuboard_base \
   --hidden-import=jump_site_modules.types \
   --collect-submodules=jump_site_modules \
+  --collect-submodules=selenium \
+  --hidden-import=selenium.webdriver.chrome.webdriver \
+  --hidden-import=selenium.webdriver.chrome.service \
+  --hidden-import=selenium.webdriver.chrome.options \
+  --hidden-import=selenium.webdriver.common.by \
+  --hidden-import=selenium.webdriver.support.ui \
+  --hidden-import=selenium.webdriver.support.expected_conditions \
   main.py
 
 ZIP_OUT="$DIST_DIR/${APP_NAME}-macos.zip"
