@@ -1007,6 +1007,9 @@ class WorkerDashboardApp(ctk.CTk):
             key = k.strip()
             if not key:
                 continue
+            # SITE_KEYS에 없는 키는 무시 (예: "오피가이드(개구리)" 등)
+            if key not in SITE_KEYS:
+                continue
             domain = str(v).strip() if v is not None else ""
             mapping[key] = domain
             # 로컬에 enabled 상태가 있으면 보존, 없으면 True
@@ -1710,6 +1713,21 @@ class WorkerDashboardApp(ctk.CTk):
             self.entry_domain.configure(state="disabled")
         except Exception:
             pass
+
+        ctk.CTkButton(
+            domain_row,
+            text="서버 동기화",
+            fg_color="transparent",
+            hover_color=COLORS["card_hover"],
+            border_width=1,
+            border_color=COLORS["border"],
+            corner_radius=STYLES["input_radius"],
+            font=_font(14),
+            text_color=COLORS["text_2"],
+            command=self._sync_platform_domains_from_backend,
+            width=104,
+            height=STYLES["entry_height"],
+        ).grid(row=0, column=1, padx=(SP["sm"], 0))
         row += 1
 
         self._field_label(content, "상호명").grid(row=row, column=0, sticky="w", pady=field_pady, padx=label_padx)

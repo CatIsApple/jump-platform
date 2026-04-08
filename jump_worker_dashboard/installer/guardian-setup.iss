@@ -21,6 +21,7 @@ SolidCompression=yes
 PrivilegesRequired=admin
 SetupIconFile=..\assets\calendar.ico
 UninstallDisplayName={#AppName} 점프 프로그램
+UninstallDisplayIcon={app}\assets\calendar.ico
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
