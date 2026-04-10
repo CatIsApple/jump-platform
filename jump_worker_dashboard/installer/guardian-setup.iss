@@ -21,7 +21,7 @@ SolidCompression=yes
 PrivilegesRequired=admin
 SetupIconFile=..\assets\calendar.ico
 UninstallDisplayName={#AppName} 점프 프로그램
-UninstallDisplayIcon={app}\assets\calendar.ico
+UninstallDisplayIcon={app}\calendar.ico
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -35,10 +35,12 @@ Name: "desktopicon"; Description: "바탕화면에 바로가기 만들기"; Grou
 [Files]
 ; PyInstaller 빌드 출력물 전체 복사
 Source: "..\dist\jump-worker-dashboard\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; 아이콘을 앱 루트에 별도로 복사 (바로가기용)
+Source: "..\assets\calendar.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\assets\calendar.ico"
-Name: "{autodesktop}\{#AppName} 점프 프로그램"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\assets\calendar.ico"; Tasks: desktopicon
+Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\calendar.ico"
+Name: "{autodesktop}\{#AppName} 점프 프로그램"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\calendar.ico"; Tasks: desktopicon
 Name: "{group}\{#AppName} 제거"; Filename: "{uninstallexe}"
 
 [Run]
