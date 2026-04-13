@@ -915,12 +915,29 @@ class WorkerDashboardApp(ctk.CTk):
         return True, msg
 
     def _handle_session_revoked(self) -> None:
-        """서버에서 세션이 폐기된 경우: 엔진 중지 + 로그아웃 + 알림."""
+        """서버에서 세션이 폐기된 경우: 엔진 중지 + 로그아웃 + 로그인 창."""
         self.engine.stop()
+        self._update_engine_buttons("stopped")
         self._clear_backend_session()
         self._refresh_license_status_label()
-        self.toast("관리자에 의해 세션이 종료되었습니다.", "error")
         self.log_bus.emit("관리자에 의해 세션이 종료되었습니다. 엔진이 중지됩니다.", "ERROR")
+
+        # 로그인 창 다시 표시
+        self.withdraw()
+        gate = LicenseGateDialog(self)
+        self.wait_window(gate)
+        if not gate.result():
+            self.destroy()
+            return
+
+        self._refresh_license_status_label()
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+
+    def _is_licensed(self) -> bool:
+        """라이센스 토큰이 유효한지 확인."""
+        return bool(self.db.get_setting(SETTING_BACKEND_TOKEN, "").strip())
 
     def _backend_logout(self, *, notify: bool = True) -> tuple[bool, str]:
         token = self.db.get_setting(SETTING_BACKEND_TOKEN, "").strip()
@@ -933,11 +950,30 @@ class WorkerDashboardApp(ctk.CTk):
                 # 서버 응답과 무관하게 로컬 세션은 정리한다.
                 pass
 
+        # 엔진 중지
+        if self.engine.is_running:
+            self.engine.stop()
+            self._update_engine_buttons("stopped")
+
         self._clear_backend_session()
         self._refresh_license_status_label()
         msg = "라이센스 로그아웃 완료"
         if notify:
             self.toast(msg, "success")
+
+        # 로그인 창 다시 표시
+        self.withdraw()
+        gate = LicenseGateDialog(self)
+        self.wait_window(gate)
+        if not gate.result():
+            self.destroy()
+            return True, msg
+
+        self._refresh_license_status_label()
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+
         return True, msg
 
     def _apply_domains_to_workflows(self, mapping: dict[str, str]) -> int:
@@ -2439,6 +2475,10 @@ class WorkerDashboardApp(ctk.CTk):
         일반 사용자 입장에서는 '엔진 시작'을 따로 누르지 않아도 실행되길 기대하므로,
         엔진이 중지 상태면 자동으로 시작한 뒤 대기열에 넣는다.
         """
+        if not self._is_licensed():
+            self.toast("라이센스 로그인이 필요합니다.", "error")
+            return
+
         started_engine = False
         if not self.engine.is_running:
             self.engine.start()
@@ -2454,6 +2494,9 @@ class WorkerDashboardApp(ctk.CTk):
     # ===== Engine / Activity =====
 
     def _start_engine(self) -> None:
+        if not self._is_licensed():
+            self.toast("라이센스 로그인이 필요합니다.", "error")
+            return
         self.engine.start()
         self.toast("엔진이 시작되었습니다.", "success", title="엔진 시작")
         self._update_engine_buttons("running")
@@ -2464,6 +2507,9 @@ class WorkerDashboardApp(ctk.CTk):
         self._update_engine_buttons("stopped")
 
     def _restart_engine(self) -> None:
+        if not self._is_licensed():
+            self.toast("라이센스 로그인이 필요합니다.", "error")
+            return
         was_running = self.engine.is_running
         self.engine.stop()
         if was_running:
