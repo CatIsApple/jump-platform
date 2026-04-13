@@ -100,6 +100,10 @@ class WorkerBackendClient:
         data = self._request("POST", "/v1/auth/logout", token=token)
         return data if isinstance(data, dict) else {}
 
+    def heartbeat(self, token: str) -> dict[str, Any]:
+        data = self._request("GET", "/v1/auth/heartbeat", token=token)
+        return data if isinstance(data, dict) else {}
+
     def platform_domains(self, token: str) -> dict[str, Any]:
         data = self._request("GET", "/v1/platform-domains", token=token)
         return data if isinstance(data, dict) else {}

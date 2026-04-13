@@ -100,6 +100,14 @@ class JumpAdminApi:
     def revoke_license(self, license_id: int) -> dict[str, Any]:
         return self._request("POST", f"/v1/admin/licenses/{int(license_id)}/revoke", json_body={})
 
+    # ---- Sessions ----
+    def list_sessions(self, license_id: int) -> list[dict[str, Any]]:
+        data = self._request("GET", f"/v1/admin/licenses/{int(license_id)}/sessions")
+        return list((data or {}).get("sessions") or [])
+
+    def revoke_session(self, session_id: int) -> dict[str, Any]:
+        return self._request("POST", f"/v1/admin/sessions/{int(session_id)}/revoke", json_body={})
+
     # ---- Platform domains ----
     def list_domains(self) -> list[dict[str, Any]]:
         data = self._request("GET", "/v1/admin/platform-domains")

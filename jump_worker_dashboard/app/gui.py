@@ -4,6 +4,7 @@ import hashlib
 import os
 import platform
 import sys
+import threading
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -624,6 +625,7 @@ class SettingsDialog(ctk.CTkToplevel):
             db=self.app.db,
             log_bus=self.app.log_bus,
             poll_interval=poll_interval,
+            on_session_revoked=self.app._session_revoked_event,
         )
         if was_running:
             self.app.engine.start()
@@ -668,10 +670,12 @@ class WorkerDashboardApp(ctk.CTk):
         ensure_platform_domains(self.db)
 
         poll_interval = float(self.db.get_setting("poll_interval", "1.0"))
+        self._session_revoked_event = threading.Event()
         self.engine = WorkerEngine(
             db=self.db,
             log_bus=self.log_bus,
             poll_interval=poll_interval,
+            on_session_revoked=self._session_revoked_event,
         )
 
         self.selected_workflow_id: Optional[int] = None
@@ -909,6 +913,14 @@ class WorkerDashboardApp(ctk.CTk):
         if notify:
             self.toast(msg, "success")
         return True, msg
+
+    def _handle_session_revoked(self) -> None:
+        """서버에서 세션이 폐기된 경우: 엔진 중지 + 로그아웃 + 알림."""
+        self.engine.stop()
+        self._clear_backend_session()
+        self._refresh_license_status_label()
+        self.toast("관리자에 의해 세션이 종료되었습니다.", "error")
+        self.log_bus.emit("관리자에 의해 세션이 종료되었습니다. 엔진이 중지됩니다.", "ERROR")
 
     def _backend_logout(self, *, notify: bool = True) -> tuple[bool, str]:
         token = self.db.get_setting(SETTING_BACKEND_TOKEN, "").strip()
@@ -2764,6 +2776,11 @@ class WorkerDashboardApp(ctk.CTk):
         # 실행 기록은 2초마다 갱신.
         if self.current_view == "ops" and self.activity_mode.get() == "실행 기록" and self._tick_count % 8 == 0:
             self._render_history()
+
+        # 세션 폐기 감지 → 자동 로그아웃 + 엔진 중지
+        if self._session_revoked_event.is_set():
+            self._session_revoked_event.clear()
+            self._handle_session_revoked()
 
         self.after(250, self._ui_tick)
 

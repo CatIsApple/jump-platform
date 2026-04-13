@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from .backend_client import BackendConfig, BackendError, WorkerBackendClient, normalize_base_url
 from .browser import BrowserManager
 from .db import Database
 from .exceptions import UserInterventionRequired
@@ -14,6 +15,10 @@ from .file_manager import artifacts_dir, cleanup_artifacts
 from .handlers import execute_workflow, requires_browser
 from .log_bus import LogBus
 from .platform_domains import is_platform_enabled
+
+SETTING_BACKEND_BASE_URL = "backend_base_url"
+SETTING_BACKEND_TOKEN = "backend_token"
+HEARTBEAT_INTERVAL = 30  # seconds
 
 
 @dataclass(frozen=True)
@@ -37,15 +42,18 @@ class WorkerEngine:
         log_bus: LogBus,
         poll_interval: float = 1.0,
         idle_sleep: float = 0.5,
+        on_session_revoked: threading.Event | None = None,
     ) -> None:
         self.db = db
         self.log_bus = log_bus
         self.poll_interval = max(0.2, float(poll_interval))
         self.idle_sleep = max(0.1, float(idle_sleep))
+        self._on_session_revoked = on_session_revoked
 
         self._stop_event = threading.Event()
         self._scheduler_thread: threading.Thread | None = None
         self._runner_thread: threading.Thread | None = None
+        self._heartbeat_thread: threading.Thread | None = None
         self._browser: BrowserManager | None = None
 
         self._queue: deque[WorkItem] = deque()
@@ -118,8 +126,14 @@ class WorkerEngine:
                 name="runner-loop",
                 daemon=True,
             )
+            self._heartbeat_thread = threading.Thread(
+                target=self._heartbeat_loop,
+                name="heartbeat-loop",
+                daemon=True,
+            )
             self._scheduler_thread.start()
             self._runner_thread.start()
+            self._heartbeat_thread.start()
 
         self.log_bus.emit(
             f"워커 엔진 시작 (순차 처리, 폴링={self.poll_interval:.1f}초)",
@@ -136,10 +150,13 @@ class WorkerEngine:
             self._scheduler_thread.join(timeout=2.0)
         if self._runner_thread:
             self._runner_thread.join(timeout=2.0)
+        if self._heartbeat_thread:
+            self._heartbeat_thread.join(timeout=2.0)
 
         with self._state_lock, self._queue_lock:
             self._scheduler_thread = None
             self._runner_thread = None
+            self._heartbeat_thread = None
             self._queue.clear()
             self._current_item = None
             self._current_started_at = None
@@ -163,6 +180,38 @@ class WorkerEngine:
         if not self.is_running:
             self.log_bus.emit("엔진이 중지 상태입니다. 시작하면 대기열 작업이 실행됩니다.", "WARNING")
         self.log_bus.emit(f"수동 실행 대기열 추가 (id={workflow_id})", "INFO")
+
+    def _heartbeat_loop(self) -> None:
+        """30초마다 서버에 세션 유효성을 확인한다. 폐기 시 엔진을 중지한다."""
+        while not self._stop_event.is_set():
+            # 30초 대기 (1초 단위로 stop 체크)
+            for _ in range(HEARTBEAT_INTERVAL):
+                if self._stop_event.is_set():
+                    return
+                time.sleep(1.0)
+
+            base_url = normalize_base_url(self.db.get_setting(SETTING_BACKEND_BASE_URL, ""))
+            token = self.db.get_setting(SETTING_BACKEND_TOKEN, "").strip()
+            if not base_url or not token:
+                continue
+
+            try:
+                client = WorkerBackendClient(BackendConfig(base_url=base_url))
+                client.heartbeat(token)
+            except BackendError as exc:
+                if exc.status_code in (401, 403):
+                    self.log_bus.emit(
+                        f"세션이 서버에서 폐기되었습니다: {exc}",
+                        "ERROR",
+                    )
+                    # 세션 폐기 이벤트 → GUI가 로그아웃 처리
+                    if self._on_session_revoked is not None:
+                        self._on_session_revoked.set()
+                    self._stop_event.set()
+                    return
+                # 네트워크 오류 등은 무시하고 다음 주기에 재시도
+            except Exception:
+                pass
 
     def _enqueue(self, item: WorkItem) -> None:
         with self._queue_lock:

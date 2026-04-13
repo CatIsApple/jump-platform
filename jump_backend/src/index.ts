@@ -173,6 +173,75 @@ async function handleAuthLogout(req: Request, env: Env): Promise<Response> {
   return json({ ok: true });
 }
 
+async function handleAuthHeartbeat(req: Request, env: Env): Promise<Response> {
+  if (req.method !== "GET") return methodNotAllowed();
+
+  try {
+    const session = await requireSession(req, env);
+    return json({
+      ok: true,
+      status: session.status,
+      expires_at: Number(session.expires_at),
+      server_time: nowUnixSeconds(),
+    });
+  } catch (e) {
+    const code = String(e instanceof Error ? e.message : e);
+    if (code === "unauthorized") return unauthorized("세션이 만료되었거나 폐기되었습니다.");
+    if (code === "expired") return forbidden("라이센스가 만료되었습니다.");
+    if (code === "forbidden") return forbidden("라이센스가 정지되었습니다.");
+    return unauthorized();
+  }
+}
+
+async function handleAdminLicenseSessions(req: Request, env: Env, licenseId: number): Promise<Response> {
+  try {
+    await requireAdmin(req, env);
+  } catch {
+    return unauthorized("관리자 인증이 필요합니다.");
+  }
+
+  if (req.method !== "GET") return methodNotAllowed();
+
+  const rows = await env.DB
+    .prepare(
+      `SELECT id, token_prefix, created_at, last_seen_at, revoked_at, device_id
+       FROM sessions
+       WHERE license_id = ?
+       ORDER BY id DESC
+       LIMIT 50`
+    )
+    .bind(licenseId)
+    .all<{
+      id: number;
+      token_prefix: string;
+      created_at: number;
+      last_seen_at: number;
+      revoked_at: number | null;
+      device_id: string;
+    }>();
+
+  return json({ ok: true, sessions: rows.results || [] });
+}
+
+async function handleAdminSessionRevoke(req: Request, env: Env, sessionId: number): Promise<Response> {
+  try {
+    await requireAdmin(req, env);
+  } catch {
+    return unauthorized("관리자 인증이 필요합니다.");
+  }
+
+  if (req.method !== "POST") return methodNotAllowed();
+
+  const now = nowUnixSeconds();
+  const result = await env.DB
+    .prepare("UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
+    .bind(now, sessionId)
+    .run();
+
+  const changed = result.meta?.changes || 0;
+  return json({ ok: true, revoked: changed > 0 });
+}
+
 async function handlePlatformDomains(req: Request, env: Env): Promise<Response> {
   if (req.method !== "GET") return methodNotAllowed();
 
@@ -390,6 +459,9 @@ export default {
     if (path === "/v1/auth/login") return handleAuthLogin(req, env);
     if (path === "/v1/auth/logout") return handleAuthLogout(req, env);
 
+    // Heartbeat (session validation)
+    if (path === "/v1/auth/heartbeat") return handleAuthHeartbeat(req, env);
+
     // User API
     if (path === "/v1/platform-domains") return handlePlatformDomains(req, env);
 
@@ -413,6 +485,16 @@ export default {
         const action = m[2];
         return handleAdminLicenseAction(req, env, licenseId, action);
       }
+    }
+    // Admin: sessions per license
+    {
+      const m = /^\/v1\/admin\/licenses\/(\d+)\/sessions$/.exec(path);
+      if (m) return handleAdminLicenseSessions(req, env, Number(m[1]));
+    }
+    // Admin: revoke individual session
+    {
+      const m = /^\/v1\/admin\/sessions\/(\d+)\/revoke$/.exec(path);
+      if (m) return handleAdminSessionRevoke(req, env, Number(m[1]));
     }
 
     // Admin: platform domains
