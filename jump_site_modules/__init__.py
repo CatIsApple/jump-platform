@@ -15,12 +15,14 @@ from typing import Any, Callable
 
 from .base import BaseSite
 from .custom.bamminjok import BamminjokSite
+from .custom.daegubam import DaegubamSite
 from .custom.kakaotteok import KakaotteokSite
 from .custom.opmart import OpmartSite
 from .gnuboard.bamje import BamjeSite
 from .gnuboard.busanbibigi import BusanbibigiSite
 from .gnuboard.hellobam import HellobamSite
 from .gnuboard.indal import IndalSite
+from .gnuboard.obam import ObamSite
 from .gnuboard.lybam import LybamSite
 from .gnuboard.opguide import OpguideSite
 from .gnuboard.oplove import OploveSite
@@ -49,6 +51,8 @@ SITE_REGISTRY: dict[str, type[BaseSite]] = {
     "인천달리기": IndalSite,
     "아이러브밤": AlbamSite,
     "부산비비기": BusanbibigiSite,
+    "대구의밤": DaegubamSite,
+    "오밤": ObamSite,
 }
 
 

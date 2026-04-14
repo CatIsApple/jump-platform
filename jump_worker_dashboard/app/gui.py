@@ -917,25 +917,73 @@ class WorkerDashboardApp(ctk.CTk):
         return True, msg
 
     def _handle_session_revoked(self) -> None:
-        """서버에서 세션이 폐기된 경우: 엔진 중지 + 로그아웃 + 로그인 창."""
-        self.engine.stop()
-        self._update_engine_buttons("stopped")
-        self._clear_backend_session()
-        self._refresh_license_status_label()
-        self.log_bus.emit("관리자에 의해 세션이 종료되었습니다. 엔진이 중지됩니다.", "ERROR")
+        """서버에서 세션이 폐기된 경우: 강제 중지 + 완전 로그아웃 + 로그인 창."""
+        self.log_bus.emit(
+            "[세션 종료] 관리자가 세션을 폐기했습니다. 즉시 중지합니다.",
+            "ERROR",
+        )
 
-        # 로그인 창 다시 표시
-        self.withdraw()
+        # 1. 큐 비우기 (대기 중인 작업 모두 폐기)
+        try:
+            with self.engine._queue_lock:
+                self.engine._queue.clear()
+                self.engine._enqueued_keys.clear()
+        except Exception:
+            pass
+
+        # 2. 엔진 중지 (stop_event set)
+        try:
+            self.engine.stop()
+        except Exception as exc:
+            self.log_bus.emit(f"엔진 중지 중 오류: {exc}", "WARNING")
+
+        # 3. 브라우저 강제 종료 (Selenium 작업 즉시 차단)
+        try:
+            if self.engine._browser is not None:
+                self.engine._browser.quit()
+                self.engine._browser = None
+        except Exception:
+            pass
+
+        # 4. UI 상태 갱신
+        self._update_engine_buttons("stopped")
+
+        # 5. 세션 + 라이센스 키 모두 제거 (자동 재로그인 차단)
+        self._clear_backend_session()
+        self.db.set_setting(SETTING_BACKEND_LICENSE_KEY, "")
+        self._refresh_license_status_label()
+
+        # 6. 사용자 알림
+        try:
+            self.toast(
+                "관리자에 의해 세션이 종료되었습니다.\n로그인 화면으로 돌아갑니다.",
+                "error",
+                title="세션 종료",
+            )
+        except Exception:
+            pass
+
+        # 7. 짧은 대기 후 로그인 게이트 (UI 안정화)
+        self.after(800, self._show_relogin_gate)
+
+    def _show_relogin_gate(self) -> None:
+        """세션 폐기/로그아웃 후 로그인 게이트를 다시 띄운다."""
+        try:
+            self.withdraw()
+        except Exception:
+            pass
         gate = LicenseGateDialog(self)
         self.wait_window(gate)
         if not gate.result():
             self.destroy()
             return
-
         self._refresh_license_status_label()
-        self.deiconify()
-        self.lift()
-        self.focus_force()
+        try:
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+        except Exception:
+            pass
 
     def _is_licensed(self) -> bool:
         """라이센스 토큰이 유효한지 확인."""
@@ -952,29 +1000,41 @@ class WorkerDashboardApp(ctk.CTk):
                 # 서버 응답과 무관하게 로컬 세션은 정리한다.
                 pass
 
+        # 큐 비우기
+        try:
+            with self.engine._queue_lock:
+                self.engine._queue.clear()
+                self.engine._enqueued_keys.clear()
+        except Exception:
+            pass
+
         # 엔진 중지
         if self.engine.is_running:
-            self.engine.stop()
+            try:
+                self.engine.stop()
+            except Exception:
+                pass
             self._update_engine_buttons("stopped")
 
+        # 브라우저 강제 종료
+        try:
+            if self.engine._browser is not None:
+                self.engine._browser.quit()
+                self.engine._browser = None
+        except Exception:
+            pass
+
+        # 세션 + 라이센스 키 제거 (자동 재로그인 방지)
         self._clear_backend_session()
+        self.db.set_setting(SETTING_BACKEND_LICENSE_KEY, "")
         self._refresh_license_status_label()
+
         msg = "라이센스 로그아웃 완료"
         if notify:
             self.toast(msg, "success")
 
-        # 로그인 창 다시 표시
-        self.withdraw()
-        gate = LicenseGateDialog(self)
-        self.wait_window(gate)
-        if not gate.result():
-            self.destroy()
-            return True, msg
-
-        self._refresh_license_status_label()
-        self.deiconify()
-        self.lift()
-        self.focus_force()
+        # 로그인 창 다시 표시 (헬퍼 재사용, 비동기)
+        self.after(300, self._show_relogin_gate)
 
         return True, msg
 
@@ -1934,7 +1994,7 @@ class WorkerDashboardApp(ctk.CTk):
 
         self.entry_post_url = ctk.CTkEntry(
             post_url_row,
-            placeholder_text="예: https://albam9.com/index.php?document_srl=109488608",
+            placeholder_text="예: https://albam9.com/store/109488608",
             height=32,
             corner_radius=6,
             fg_color=COLORS["card"],
