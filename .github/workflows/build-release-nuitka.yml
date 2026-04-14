@@ -298,9 +298,9 @@ jobs:
 
       - name: Register releases in backend (D1)
         env:
-          ADMIN_BASE_URL: https://api.guardian01.online
-          CF_ACCESS_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-          CF_ACCESS_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          # CI 전용 엔드포인트 /v1/ci/releases — CF Access 밖, X-Admin-Token만 검증
+          CI_ENDPOINT: https://api.guardian01.online/v1/ci/releases
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
           VERSION: ${{ steps.meta.outputs.version }}
           WIN_FILE: ${{ steps.meta.outputs.win_file }}
           WIN_SIZE: ${{ steps.meta.outputs.win_size }}
@@ -326,16 +326,14 @@ jobs:
               '{version:$v, platform:$p, r2_key:$k, filename:$f, size:$s, sha256:$h, notes:$n}')
 
             echo "Registering $platform release v${VERSION}..."
-            # User-Agent 명시 — 미기재 시 CF Bot Management가 challenge 반환
             HTTP_CODE=$(curl -s -o /tmp/register_resp.json -w "%{http_code}" \
               -X POST \
-              -A "jump-platform-ci/1.0 (github-actions)" \
+              -A "jump-platform-ci/1.0" \
               -H "Content-Type: application/json" \
               -H "Accept: application/json" \
-              -H "CF-Access-Client-Id: ${CF_ACCESS_ID}" \
-              -H "CF-Access-Client-Secret: ${CF_ACCESS_SECRET}" \
+              -H "X-Admin-Token: ${ADMIN_TOKEN}" \
               -d "$payload" \
-              "${ADMIN_BASE_URL}/v1/admin/releases")
+              "${CI_ENDPOINT}")
 
             cat /tmp/register_resp.json
             echo ""

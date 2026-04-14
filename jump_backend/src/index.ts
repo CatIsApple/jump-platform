@@ -382,6 +382,74 @@ async function handleUpdatesDownload(req: Request, env: Env, releaseId: number):
   return new Response(obj.body, { headers });
 }
 
+async function handleCiReleases(req: Request, env: Env): Promise<Response> {
+  // CF Access 뒤에 있지 않은 CI 전용 endpoint — X-Admin-Token만 검증.
+  const adminToken = (env.ADMIN_TOKEN || "").trim();
+  if (!adminToken) {
+    return json({ ok: false, error: "admin_token_not_set" }, { status: 500 });
+  }
+  const provided = (req.headers.get("X-Admin-Token") || "").trim();
+  if (!provided || provided !== adminToken) {
+    return unauthorized("Invalid admin token");
+  }
+
+  if (req.method !== "POST") return methodNotAllowed();
+
+  // handleAdminReleases의 POST 로직과 동일
+  const body = await parseJson<{
+    version?: unknown;
+    platform?: unknown;
+    r2_key?: unknown;
+    filename?: unknown;
+    size?: unknown;
+    sha256?: unknown;
+    notes?: unknown;
+  }>(req);
+  if (!body) return badRequest("JSON 본문이 필요합니다.");
+
+  const version = String(body.version || "").trim();
+  const platform = String(body.platform || "").trim().toLowerCase();
+  const r2Key = String(body.r2_key || "").trim();
+  const filename = String(body.filename || "").trim();
+  const size = Number(body.size);
+  const sha256 = String(body.sha256 || "").trim().toLowerCase();
+  const notes = String(body.notes || "").trim();
+
+  if (!version) return badRequest("version 누락");
+  if (platform !== "windows" && platform !== "macos") {
+    return badRequest("platform은 windows 또는 macos");
+  }
+  if (!r2Key) return badRequest("r2_key 누락");
+  if (!filename) return badRequest("filename 누락");
+  if (!Number.isFinite(size) || size <= 0) return badRequest("size 부적절");
+  if (!/^[0-9a-f]{64}$/.test(sha256)) return badRequest("sha256은 64자 hex");
+
+  const head = await env.RELEASES.head(r2Key);
+  if (!head) return badRequest(`R2 객체를 찾을 수 없습니다: ${r2Key}`);
+  if (Number(head.size) !== size) {
+    return badRequest(`size 불일치 (메타데이터: ${size}, R2: ${head.size})`);
+  }
+
+  const now = nowUnixSeconds();
+  await env.DB
+    .prepare(
+      `INSERT INTO releases(version, platform, r2_key, filename, size, sha256, notes, released_at, is_published)
+       VALUES(?, ?, ?, ?, ?, ?, ?, ?, 1)
+       ON CONFLICT(version, platform) DO UPDATE SET
+         r2_key = excluded.r2_key,
+         filename = excluded.filename,
+         size = excluded.size,
+         sha256 = excluded.sha256,
+         notes = excluded.notes,
+         released_at = excluded.released_at,
+         is_published = 1`
+    )
+    .bind(version, platform, r2Key, filename, size, sha256, notes, now)
+    .run();
+
+  return json({ ok: true, version, platform, released_at: now });
+}
+
 async function handleAdminReleases(req: Request, env: Env): Promise<Response> {
   try {
     await requireAdmin(req, env);
@@ -747,6 +815,9 @@ export default {
       const m = /^\/v1\/updates\/download\/(\d+)$/.exec(path);
       if (m) return handleUpdatesDownload(req, env, Number(m[1]));
     }
+
+    // CI-only releases registration — CF Access 밖에서 X-Admin-Token으로 인증
+    if (path === "/v1/ci/releases") return handleCiReleases(req, env);
 
     // Admin: releases
     if (path === "/v1/admin/releases") return handleAdminReleases(req, env);
