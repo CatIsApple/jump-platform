@@ -274,45 +274,25 @@ jobs:
       # R2에 업로드 + 백엔드(D1)에 메타데이터 등록.
       # 클라이언트는 백엔드를 통해서만 업데이트 받으므로 GitHub 노출 없음.
 
-      - name: Setup AWS CLI for R2
-        run: |
-          if ! command -v aws &> /dev/null; then
-            sudo apt-get install -y awscli
-          fi
-          aws --version
-          # R2는 multipart upload 권한이 없으므로 single PUT으로 강제
-          mkdir -p ~/.aws
-          cat > ~/.aws/config <<'EOF'
-          [default]
-          s3 =
-              multipart_threshold = 5GB
-              multipart_chunksize = 5GB
-          EOF
-          echo "AWS config written."
-
-      - name: Upload binaries to R2
+      - name: Upload binaries to R2 (via wrangler)
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-          R2_BUCKET: jump-platform-releases
+          CLOUDFLARE_API_KEY: ${{ secrets.CLOUDFLARE_API_KEY }}
+          CLOUDFLARE_EMAIL: ${{ secrets.CLOUDFLARE_EMAIL }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -e
           cd release
           if [[ -f GUARDIAN_Jump_Setup.exe ]]; then
-            aws s3 cp GUARDIAN_Jump_Setup.exe \
-              "s3://${R2_BUCKET}/releases/v${VERSION}/GUARDIAN_Jump_Setup.exe" \
-              --endpoint-url "${R2_ENDPOINT}" \
-              --no-progress
+            npx wrangler@4 r2 object put \
+              "jump-platform-releases/releases/v${VERSION}/GUARDIAN_Jump_Setup.exe" \
+              --file GUARDIAN_Jump_Setup.exe --remote
             echo "Uploaded Windows exe → releases/v${VERSION}/GUARDIAN_Jump_Setup.exe"
           fi
           if [[ -f jump-worker-dashboard-macos.zip ]]; then
-            aws s3 cp jump-worker-dashboard-macos.zip \
-              "s3://${R2_BUCKET}/releases/v${VERSION}/jump-worker-dashboard-macos.zip" \
-              --endpoint-url "${R2_ENDPOINT}" \
-              --no-progress
+            npx wrangler@4 r2 object put \
+              "jump-platform-releases/releases/v${VERSION}/jump-worker-dashboard-macos.zip" \
+              --file jump-worker-dashboard-macos.zip --remote
             echo "Uploaded macOS zip → releases/v${VERSION}/jump-worker-dashboard-macos.zip"
           fi
 
