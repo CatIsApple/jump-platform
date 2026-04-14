@@ -283,7 +283,7 @@ async function handleAdminLicenses(req: Request, env: Env): Promise<Response> {
     const rows = await env.DB
       .prepare(
         `
-        SELECT id, key_prefix, company_name, created_at, expires_at, status, note
+        SELECT id, key_prefix, license_key, company_name, created_at, expires_at, status, note
         FROM licenses
         ORDER BY id DESC
         `
@@ -291,6 +291,7 @@ async function handleAdminLicenses(req: Request, env: Env): Promise<Response> {
       .all<{
         id: number;
         key_prefix: string;
+        license_key: string | null;
         company_name: string;
         created_at: number;
         expires_at: number;
@@ -327,11 +328,11 @@ async function handleAdminLicenses(req: Request, env: Env): Promise<Response> {
     const res = await env.DB
       .prepare(
         `
-        INSERT INTO licenses(key_hash, key_prefix, company_name, created_at, expires_at, status, note)
-        VALUES(?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO licenses(key_hash, key_prefix, license_key, company_name, created_at, expires_at, status, note)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?)
         `
       )
-      .bind(keyHash, keyPrefix, companyName, now, expiresAt, "active", note)
+      .bind(keyHash, keyPrefix, licenseKey, companyName, now, expiresAt, "active", note)
       .run();
 
     const id = Number(res.meta?.last_row_id || 0);
