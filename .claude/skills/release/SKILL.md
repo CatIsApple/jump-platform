@@ -178,6 +178,88 @@ curl -s -X POST -H "CF-Access-Client-Id: fc1aa72f3308d25496c24f5ba6e9eae3.access
   xattr -cr dist/jump-worker-dashboard.app
   ```
 
+## 수동 수습 (CI R2 업로드 실패 시)
+
+GitHub Actions의 `release` job이 R2 업로드에서 실패(예: multipart AccessDenied)할 때
+**빌드된 아티팩트는 남아있으므로** 수동으로 R2 업로드 + D1 등록만 하면 됨.
+
+### 증상
+- `build-windows-nuitka`, `build-macos`: success
+- `release`: failure (`Upload binaries to R2` 단계)
+- GitHub Release는 생성되어 있음 (파일 첨부 포함)
+- R2/D1에는 등록 안 됨 → 클라이언트가 업데이트 못 받음
+
+### 수동 복구 절차
+
+```bash
+# 1. 아티팩트 다운로드
+mkdir -p /tmp/vX.Y.Z_release && cd /tmp/vX.Y.Z_release
+RUN_ID=$(gh api repos/CatIsApple/jump-platform/actions/runs \
+  --jq '[.workflow_runs[] | select(.head_branch == "vX.Y.Z")][0].id')
+gh run download $RUN_ID -R CatIsApple/jump-platform
+
+# 2. 메타데이터 계산
+WIN=/tmp/vX.Y.Z_release/jump-worker-dashboard-windows/GUARDIAN_Jump_Setup.exe
+MAC=/tmp/vX.Y.Z_release/jump-worker-dashboard-macos/jump-worker-dashboard-macos.zip
+WIN_SIZE=$(stat -f%z "$WIN") && WIN_SHA=$(shasum -a 256 "$WIN" | awk '{print $1}')
+MAC_SIZE=$(stat -f%z "$MAC") && MAC_SHA=$(shasum -a 256 "$MAC" | awk '{print $1}')
+
+# 3. R2 업로드 (wrangler — multipart 이슈 없음)
+cd /Users/daon/Downloads/dist/jump_platform/jump_backend
+export CLOUDFLARE_API_KEY="ae832649cb729e7decfc0cbb487f6171d9897"
+export CLOUDFLARE_EMAIL="tiok0812@gmail.com"
+export CLOUDFLARE_ACCOUNT_ID="9606dcd69b23133a781ed46f4588f94a"
+
+npx wrangler r2 object put \
+  jump-platform-releases/releases/vX.Y.Z/GUARDIAN_Jump_Setup.exe \
+  --file "$WIN" --remote
+
+npx wrangler r2 object put \
+  jump-platform-releases/releases/vX.Y.Z/jump-worker-dashboard-macos.zip \
+  --file "$MAC" --remote
+
+# 4. D1 등록 (Windows + macOS 각각)
+NOTES="유저용 changelog..."
+
+for META in "windows::GUARDIAN_Jump_Setup.exe::$WIN_SIZE::$WIN_SHA" \
+            "macos::jump-worker-dashboard-macos.zip::$MAC_SIZE::$MAC_SHA"; do
+  IFS="::" read -r PLATFORM FILENAME SIZE SHA <<< "$META"
+  curl -s -X POST \
+    -H "CF-Access-Client-Id: fc1aa72f3308d25496c24f5ba6e9eae3.access" \
+    -H "CF-Access-Client-Secret: 0626ec1116c10885e4e88300885619cd9c0fd74b167b4ebc90767da201da6895" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -nc --arg v "X.Y.Z" --arg p "$PLATFORM" \
+                 --arg k "releases/vX.Y.Z/$FILENAME" --arg f "$FILENAME" \
+                 --argjson s $SIZE --arg h "$SHA" --arg n "$NOTES" \
+                 '{version:$v, platform:$p, r2_key:$k, filename:$f, size:$s, sha256:$h, notes:$n}')" \
+    https://api.guardian01.online/v1/admin/releases
+  echo ""
+done
+```
+
+### 근본 해결 (다음 릴리즈 전)
+
+R2는 multipart upload 권한이 없는 토큰 사용 시 `CreateMultipartUpload` 실패.
+`.github/workflows/build-release-nuitka.yml`의 `Setup AWS CLI for R2` 스텝에
+다음 config 포함되어야 함 (이미 추가됨):
+
+```yaml
+- name: Setup AWS CLI for R2
+  run: |
+    if ! command -v aws &> /dev/null; then
+      sudo apt-get install -y awscli
+    fi
+    aws --version
+    # R2는 multipart upload 권한이 없으므로 single PUT으로 강제
+    mkdir -p ~/.aws
+    cat > ~/.aws/config <<'EOF'
+    [default]
+    s3 =
+        multipart_threshold = 5GB
+        multipart_chunksize = 5GB
+    EOF
+```
+
 ## 긴급 롤백
 
 ```bash

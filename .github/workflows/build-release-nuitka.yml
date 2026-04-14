@@ -280,6 +280,15 @@ jobs:
             sudo apt-get install -y awscli
           fi
           aws --version
+          # R2는 multipart upload 권한이 없으므로 single PUT으로 강제
+          mkdir -p ~/.aws
+          cat > ~/.aws/config <<'EOF'
+          [default]
+          s3 =
+              multipart_threshold = 5GB
+              multipart_chunksize = 5GB
+          EOF
+          echo "AWS config written."
 
       - name: Upload binaries to R2
         env:
