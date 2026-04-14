@@ -14,8 +14,10 @@ from typing import Optional
 
 import customtkinter as ctk
 
+from .. import __version__ as APP_VERSION
 from .backend_client import BackendConfig, BackendError, WorkerBackendClient, normalize_base_url
 from .db import Database, normalize_time_token
+from . import updater
 from .engine import WorkerEngine
 from .file_manager import artifacts_dir
 from .log_bus import LogBus
@@ -702,9 +704,16 @@ class WorkerDashboardApp(ctk.CTk):
         self._reload_workflow_list()
         self._refresh_stats()
 
+        # 업데이트 상태
+        self._latest_update: updater.UpdateInfo | None = None
+        self._update_check_lock = threading.Lock()
+        self._update_in_progress = False
+
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(250, self._ui_tick)
         self.after(900, self._startup_with_license_gate)
+        # 로그인 후 5초 뒤 첫 업데이트 체크
+        self.after(6000, self._kickoff_update_check)
 
     # ===== Reusable Widgets =====
 
@@ -915,6 +924,184 @@ class WorkerDashboardApp(ctk.CTk):
         if notify:
             self.toast(msg, "success")
         return True, msg
+
+    # ─── 자동 업데이트 ────────────────────────────────────────
+
+    def _kickoff_update_check(self) -> None:
+        """앱 시작 후 백그라운드 업데이트 체크 + 30분마다 재확인."""
+        threading.Thread(
+            target=self._update_check_worker,
+            name="update-check",
+            daemon=True,
+        ).start()
+        # 30분마다 재체크
+        self.after(30 * 60 * 1000, self._kickoff_update_check)
+
+    def _update_check_worker(self) -> None:
+        """백그라운드 스레드: 토큰이 있으면 최신 버전 조회."""
+        if not self._update_check_lock.acquire(blocking=False):
+            return
+        try:
+            base_url = normalize_base_url(self.db.get_setting(SETTING_BACKEND_BASE_URL, ""))
+            token = self.db.get_setting(SETTING_BACKEND_TOKEN, "").strip()
+            if not base_url or not token:
+                return
+
+            try:
+                info = updater.check_latest_version(base_url, token, timeout_s=10.0)
+            except updater.UpdateError as exc:
+                # 인증 만료 등은 무시 (heartbeat가 처리)
+                self.log_bus.emit(f"[업데이트] 체크 실패: {exc}", "DEBUG")
+                return
+            except Exception as exc:
+                self.log_bus.emit(f"[업데이트] 예외: {exc}", "DEBUG")
+                return
+
+            if info is None:
+                return
+
+            if updater._is_newer(info.version, APP_VERSION):
+                self._latest_update = info
+                # UI 업데이트는 메인 스레드에서
+                self.after(0, self._show_update_badge)
+            else:
+                self.log_bus.emit(
+                    f"[업데이트] 최신 버전입니다 (현재: v{APP_VERSION})",
+                    "DEBUG",
+                )
+        finally:
+            self._update_check_lock.release()
+
+    def _show_update_badge(self) -> None:
+        """업데이트 발견 시 사이드바에 배지 표시."""
+        info = self._latest_update
+        if info is None:
+            return
+        try:
+            self.btn_update.configure(text=f"업데이트 가능 v{info.version}")
+            # 이미 pack 됐는지 체크
+            if not self.btn_update.winfo_ismapped():
+                # 버전 라벨 위에 삽입 (같은 부모, before=lbl_version)
+                self.btn_update.pack(
+                    fill="x",
+                    padx=SP["sm"],
+                    pady=(0, SP["md"]),
+                    before=self.lbl_version,
+                )
+        except Exception:
+            pass
+        self.log_bus.emit(
+            f"[업데이트] 새 버전 발견: v{info.version} (현재 v{APP_VERSION})",
+            "INFO",
+        )
+
+    def _on_update_click(self) -> None:
+        """업데이트 배지 클릭 → 확인 모달 → 다운로드 + 설치."""
+        info = self._latest_update
+        if info is None:
+            self.toast("업데이트 정보가 없습니다.", "info")
+            return
+        if self._update_in_progress:
+            self.toast("이미 업데이트가 진행 중입니다.", "info")
+            return
+
+        size_mb = info.size / 1024 / 1024
+        notes_preview = (info.notes[:200] + "...") if len(info.notes) > 200 else info.notes
+        msg = (
+            f"새 버전 v{info.version}을(를) 다운로드하시겠습니까?\n\n"
+            f"현재 버전: v{APP_VERSION}\n"
+            f"파일 크기: {size_mb:.1f} MB\n\n"
+            f"{notes_preview if notes_preview else ''}\n\n"
+            f"다운로드 + 설치 후 자동으로 재시작됩니다."
+        )
+
+        dialog = ConfirmDialog(self, f"업데이트 v{info.version}", msg)
+        self.wait_window(dialog)
+        if not dialog.result():
+            return
+
+        self._update_in_progress = True
+        threading.Thread(
+            target=self._update_download_worker,
+            name="update-download",
+            daemon=True,
+        ).start()
+
+    def _update_download_worker(self) -> None:
+        """백그라운드 다운로드 + 설치."""
+        info = self._latest_update
+        if info is None:
+            self._update_in_progress = False
+            return
+
+        base_url = normalize_base_url(self.db.get_setting(SETTING_BACKEND_BASE_URL, ""))
+        token = self.db.get_setting(SETTING_BACKEND_TOKEN, "").strip()
+        if not base_url or not token:
+            self._update_in_progress = False
+            self.after(0, lambda: self.toast("로그인이 필요합니다.", "error"))
+            return
+
+        dest = updater.get_download_dir() / info.filename
+
+        def progress(received: int, total: int) -> None:
+            if total > 0:
+                pct = int(received / total * 100)
+                self.after(0, lambda p=pct: self._update_progress(p))
+
+        self.after(0, lambda: self._update_progress(0))
+        self.after(0, lambda: self.log_bus.emit(
+            f"[업데이트] v{info.version} 다운로드 시작...",
+            "INFO",
+        ))
+
+        try:
+            downloaded = updater.download_update(
+                base_url, token, info, dest, progress_cb=progress
+            )
+        except updater.UpdateError as exc:
+            self._update_in_progress = False
+            self.after(0, lambda e=exc: self.toast(f"다운로드 실패: {e}", "error"))
+            self.after(0, lambda e=exc: self.log_bus.emit(
+                f"[업데이트] 다운로드 실패: {e}", "ERROR"
+            ))
+            self.after(0, lambda: self._update_progress(-1))
+            return
+
+        self.after(0, lambda: self.log_bus.emit(
+            f"[업데이트] 다운로드 완료. 설치 시작 (앱이 종료됩니다)...",
+            "INFO",
+        ))
+        self.after(0, lambda: self.toast(
+            "업데이트 설치 중... 잠시 후 자동 재시작됩니다.",
+            "info",
+            duration_ms=10000,
+        ))
+
+        # 1초 대기 후 설치 (사용자가 메시지 읽을 시간)
+        try:
+            import time as _t
+            _t.sleep(1.5)
+            updater.install_and_restart(downloaded)
+        except updater.UpdateError as exc:
+            self._update_in_progress = False
+            self.after(0, lambda e=exc: self.toast(f"설치 실패: {e}", "error"))
+            self.after(0, lambda e=exc: self.log_bus.emit(
+                f"[업데이트] 설치 실패: {e}", "ERROR"
+            ))
+
+    def _update_progress(self, pct: int) -> None:
+        """다운로드 진행률을 배지에 표시 (-1 = 실패)."""
+        try:
+            if pct < 0:
+                self.btn_update.configure(text=f"업데이트 가능 v{self._latest_update.version}")
+            elif pct >= 100:
+                self.btn_update.configure(text="설치 준비 중...")
+            else:
+                self.btn_update.configure(text=f"다운로드 중... {pct}%")
+        except Exception:
+            pass
+
+    # ─── ────────────────────────────────────────────────────
 
     def _handle_session_revoked(self) -> None:
         """서버에서 세션이 폐기된 경우: 강제 중지 + 완전 로그아웃 + 로그인 창."""
@@ -1349,12 +1536,30 @@ class WorkerDashboardApp(ctk.CTk):
             command=self._backend_logout,
         ).pack(fill="x", padx=SP["sm"], pady=(0, SP["md"]))
 
-        ctk.CTkLabel(
+        # 업데이트 배지 (기본 숨김 — 새 버전 발견 시 표시)
+        self.btn_update = ctk.CTkButton(
             bottom,
-            text="v0.3.0 by Da0nn",
+            text="업데이트 가능",
+            height=STYLES["button_height"],
+            fg_color="#1e3a5f",
+            hover_color="#2563eb",
+            border_width=1,
+            border_color="#3b82f6",
+            corner_radius=STYLES["button_radius"],
+            font=_font(13, "bold"),
+            text_color="#60a5fa",
+            command=self._on_update_click,
+        )
+        # pack 안 함 — 업데이트 발견 시 _show_update_badge에서 pack
+
+        # 버전 라벨
+        self.lbl_version = ctk.CTkLabel(
+            bottom,
+            text=f"v{APP_VERSION} by Da0nn",
             font=_font(10),
             text_color=COLORS["text_4"],
-        ).pack(anchor="w", padx=SP["sm"])
+        )
+        self.lbl_version.pack(anchor="w", padx=SP["sm"])
 
     # ===== Container =====
 

@@ -3,6 +3,7 @@ import { badRequest, forbidden, json, methodNotAllowed, notFound, parseJson, una
 
 export interface Env {
   DB: D1Database;
+  RELEASES: R2Bucket;
   ENV?: string;
   LICENSE_PEPPER: string;
   ADMIN_TOKEN?: string;
@@ -240,6 +241,243 @@ async function handleAdminSessionRevoke(req: Request, env: Env, sessionId: numbe
 
   const changed = result.meta?.changes || 0;
   return json({ ok: true, revoked: changed > 0 });
+}
+
+// ─── Updates ────────────────────────────────────────────────────
+//
+// 자동 업데이트 보안 모델:
+//   - 클라이언트는 라이센스 토큰만 있음 (GitHub 정보 노출 0)
+//   - 바이너리는 R2 private 버킷에서 Worker 통해 직접 스트리밍
+//   - GitHub 외부 노출 없음 (R2 키도 클라이언트가 알 필요 없음, ID로만 참조)
+//   - sha256 검증으로 무결성 보장
+
+interface ReleaseRow {
+  id: number;
+  version: string;
+  platform: string;
+  r2_key: string;
+  filename: string;
+  size: number;
+  sha256: string;
+  notes: string;
+  released_at: number;
+  is_published: number;
+}
+
+function detectPlatform(req: Request): string {
+  // 우선순위: query param > X-Update-Platform header > User-Agent 추정
+  const url = new URL(req.url);
+  const qp = (url.searchParams.get("platform") || "").toLowerCase().trim();
+  if (qp === "windows" || qp === "macos") return qp;
+
+  const hdr = (req.headers.get("X-Update-Platform") || "").toLowerCase().trim();
+  if (hdr === "windows" || hdr === "macos") return hdr;
+
+  const ua = (req.headers.get("User-Agent") || "").toLowerCase();
+  if (ua.includes("windows")) return "windows";
+  if (ua.includes("mac")) return "macos";
+  return "windows";  // 기본값
+}
+
+async function handleUpdatesLatest(req: Request, env: Env): Promise<Response> {
+  if (req.method !== "GET") return methodNotAllowed();
+
+  let session;
+  try {
+    session = await requireSession(req, env);
+  } catch (e) {
+    const code = String(e instanceof Error ? e.message : e);
+    if (code === "expired") return forbidden("라이센스가 만료되었습니다.");
+    if (code === "forbidden") return forbidden("라이센스가 정지되었습니다.");
+    return unauthorized();
+  }
+
+  const platform = detectPlatform(req);
+
+  const row = await env.DB
+    .prepare(
+      `SELECT id, version, platform, r2_key, filename, size, sha256, notes, released_at, is_published
+       FROM releases
+       WHERE is_published = 1 AND platform = ?
+       ORDER BY released_at DESC, id DESC
+       LIMIT 1`
+    )
+    .bind(platform)
+    .first<ReleaseRow>();
+
+  if (!row) {
+    return json({
+      ok: true,
+      latest: null,
+      platform,
+      message: "릴리즈 정보가 없습니다.",
+    });
+  }
+
+  return json({
+    ok: true,
+    latest: {
+      id: row.id,
+      version: row.version,
+      platform: row.platform,
+      filename: row.filename,
+      size: Number(row.size),
+      sha256: row.sha256,
+      notes: row.notes || "",
+      released_at: Number(row.released_at),
+      // 클라이언트는 이 path에 Bearer 헤더로 GET → Worker가 R2 스트리밍
+      download_path: `/v1/updates/download/${row.id}`,
+    },
+  });
+}
+
+async function handleUpdatesDownload(req: Request, env: Env, releaseId: number): Promise<Response> {
+  if (req.method !== "GET") return methodNotAllowed();
+
+  let session;
+  try {
+    session = await requireSession(req, env);
+  } catch (e) {
+    const code = String(e instanceof Error ? e.message : e);
+    if (code === "expired") return forbidden("라이센스가 만료되었습니다.");
+    if (code === "forbidden") return forbidden("라이센스가 정지되었습니다.");
+    return unauthorized();
+  }
+
+  const row = await env.DB
+    .prepare(
+      `SELECT id, r2_key, filename, size, sha256, is_published
+       FROM releases WHERE id = ? LIMIT 1`
+    )
+    .bind(releaseId)
+    .first<{ id: number; r2_key: string; filename: string; size: number; sha256: string; is_published: number }>();
+
+  if (!row) return notFound();
+  if (!row.is_published) return forbidden("이 릴리즈는 배포 중지되었습니다.");
+
+  // R2에서 객체 가져오기
+  const obj = await env.RELEASES.get(row.r2_key);
+  if (!obj) return notFound();
+
+  // 다운로드 로그 (best-effort, 응답 차단하지 않음)
+  const now = nowUnixSeconds();
+  const deviceId = req.headers.get("X-Device-Id") || "";
+  env.DB
+    .prepare(
+      `INSERT INTO update_downloads(release_id, license_id, device_id, bytes_sent, status, downloaded_at)
+       VALUES(?, ?, ?, ?, ?, ?)`
+    )
+    .bind(row.id, session.license_id, deviceId, Number(row.size), "ok", now)
+    .run()
+    .catch(() => {});
+
+  // R2 객체를 그대로 스트리밍 (Worker가 메모리에 다 받지 않고 흘려보냄)
+  const headers = new Headers();
+  headers.set("Content-Type", "application/octet-stream");
+  headers.set("Content-Disposition", `attachment; filename="${row.filename}"`);
+  headers.set("X-Content-SHA256", row.sha256);
+  headers.set("Content-Length", String(row.size));
+  headers.set("Cache-Control", "no-store");
+
+  return new Response(obj.body, { headers });
+}
+
+async function handleAdminReleases(req: Request, env: Env): Promise<Response> {
+  try {
+    await requireAdmin(req, env);
+  } catch {
+    return unauthorized("관리자 인증이 필요합니다.");
+  }
+
+  if (req.method === "GET") {
+    const rows = await env.DB
+      .prepare(
+        `SELECT id, version, platform, r2_key, filename, size, sha256, notes, released_at, is_published
+         FROM releases ORDER BY released_at DESC, id DESC LIMIT 100`
+      )
+      .all<ReleaseRow>();
+    return json({ ok: true, releases: rows.results || [] });
+  }
+
+  if (req.method === "POST") {
+    // GitHub Actions 또는 어드민 도구가 R2 업로드 후 메타데이터 등록
+    const body = await parseJson<{
+      version?: unknown;
+      platform?: unknown;
+      r2_key?: unknown;
+      filename?: unknown;
+      size?: unknown;
+      sha256?: unknown;
+      notes?: unknown;
+    }>(req);
+    if (!body) return badRequest("JSON 본문이 필요합니다.");
+
+    const version = String(body.version || "").trim();
+    const platform = String(body.platform || "").trim().toLowerCase();
+    const r2Key = String(body.r2_key || "").trim();
+    const filename = String(body.filename || "").trim();
+    const size = Number(body.size);
+    const sha256 = String(body.sha256 || "").trim().toLowerCase();
+    const notes = String(body.notes || "").trim();
+
+    if (!version) return badRequest("version 누락");
+    if (platform !== "windows" && platform !== "macos") {
+      return badRequest("platform은 windows 또는 macos");
+    }
+    if (!r2Key) return badRequest("r2_key 누락");
+    if (!filename) return badRequest("filename 누락");
+    if (!Number.isFinite(size) || size <= 0) return badRequest("size 부적절");
+    if (!/^[0-9a-f]{64}$/.test(sha256)) return badRequest("sha256은 64자 hex");
+
+    // R2에 실제 객체 존재 확인
+    const head = await env.RELEASES.head(r2Key);
+    if (!head) return badRequest(`R2 객체를 찾을 수 없습니다: ${r2Key}`);
+    if (Number(head.size) !== size) {
+      return badRequest(`size 불일치 (메타데이터: ${size}, R2: ${head.size})`);
+    }
+
+    const now = nowUnixSeconds();
+    await env.DB
+      .prepare(
+        `INSERT INTO releases(version, platform, r2_key, filename, size, sha256, notes, released_at, is_published)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, 1)
+         ON CONFLICT(version, platform) DO UPDATE SET
+           r2_key = excluded.r2_key,
+           filename = excluded.filename,
+           size = excluded.size,
+           sha256 = excluded.sha256,
+           notes = excluded.notes,
+           released_at = excluded.released_at,
+           is_published = 1`
+      )
+      .bind(version, platform, r2Key, filename, size, sha256, notes, now)
+      .run();
+
+    return json({ ok: true, version, platform, released_at: now });
+  }
+
+  return methodNotAllowed();
+}
+
+async function handleAdminReleaseAction(req: Request, env: Env, releaseId: number, action: string): Promise<Response> {
+  try {
+    await requireAdmin(req, env);
+  } catch {
+    return unauthorized("관리자 인증이 필요합니다.");
+  }
+  if (req.method !== "POST") return methodNotAllowed();
+
+  if (action === "publish" || action === "unpublish") {
+    const flag = action === "publish" ? 1 : 0;
+    const result = await env.DB
+      .prepare("UPDATE releases SET is_published = ? WHERE id = ?")
+      .bind(flag, releaseId)
+      .run();
+    if (!(result.meta?.changes || 0)) return notFound();
+    return json({ ok: true, id: releaseId, is_published: !!flag });
+  }
+
+  return badRequest("지원하지 않는 액션", { action });
 }
 
 async function handlePlatformDomains(req: Request, env: Env): Promise<Response> {
@@ -502,6 +740,20 @@ export default {
 
     // User API
     if (path === "/v1/platform-domains") return handlePlatformDomains(req, env);
+
+    // Updates (auto-update for clients)
+    if (path === "/v1/updates/latest") return handleUpdatesLatest(req, env);
+    {
+      const m = /^\/v1\/updates\/download\/(\d+)$/.exec(path);
+      if (m) return handleUpdatesDownload(req, env, Number(m[1]));
+    }
+
+    // Admin: releases
+    if (path === "/v1/admin/releases") return handleAdminReleases(req, env);
+    {
+      const m = /^\/v1\/admin\/releases\/(\d+)\/(publish|unpublish)$/.exec(path);
+      if (m) return handleAdminReleaseAction(req, env, Number(m[1]), m[2]);
+    }
 
     // Admin health
     if (path === "/v1/admin/health") {

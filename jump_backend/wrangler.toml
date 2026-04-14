@@ -15,6 +15,10 @@ binding = "DB"
 database_name = "jump_backend_db"
 database_id = "ae50d38a-4435-42f7-8d55-05159dc1397f"
 
+[[r2_buckets]]
+binding = "RELEASES"
+bucket_name = "jump-platform-releases"
+
 # (선택) 관리자 API 이중 보호용 토큰. Cloudflare Access를 쓰더라도 실수 방지 차원에서 권장.
 # ADMIN_TOKEN = "set-in-dashboard-or-wrangler-secret"
 #

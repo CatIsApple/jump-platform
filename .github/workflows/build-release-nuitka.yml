@@ -234,10 +234,34 @@ jobs:
           name: jump-worker-dashboard-windows
           path: release
 
-      - name: Create checksums
+      - name: Compute version + checksums
+        id: meta
         run: |
+          # Tag → version (strip leading 'v')
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
           cd release
           sha256sum * > SHA256SUMS.txt
+
+          # Per-file metadata
+          WIN_FILE="GUARDIAN_Jump_Setup.exe"
+          MAC_FILE="jump-worker-dashboard-macos.zip"
+
+          if [[ -f "$WIN_FILE" ]]; then
+            WIN_SIZE=$(stat -c%s "$WIN_FILE")
+            WIN_SHA=$(sha256sum "$WIN_FILE" | awk '{print $1}')
+            echo "win_size=$WIN_SIZE" >> $GITHUB_OUTPUT
+            echo "win_sha=$WIN_SHA" >> $GITHUB_OUTPUT
+            echo "win_file=$WIN_FILE" >> $GITHUB_OUTPUT
+          fi
+          if [[ -f "$MAC_FILE" ]]; then
+            MAC_SIZE=$(stat -c%s "$MAC_FILE")
+            MAC_SHA=$(sha256sum "$MAC_FILE" | awk '{print $1}')
+            echo "mac_size=$MAC_SIZE" >> $GITHUB_OUTPUT
+            echo "mac_sha=$MAC_SHA" >> $GITHUB_OUTPUT
+            echo "mac_file=$MAC_FILE" >> $GITHUB_OUTPUT
+          fi
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -245,3 +269,93 @@ jobs:
           files: |
             release/*
           generate_release_notes: true
+
+      # ─── Auto-update infrastructure ────────────────────────────
+      # R2에 업로드 + 백엔드(D1)에 메타데이터 등록.
+      # 클라이언트는 백엔드를 통해서만 업데이트 받으므로 GitHub 노출 없음.
+
+      - name: Setup AWS CLI for R2
+        run: |
+          if ! command -v aws &> /dev/null; then
+            sudo apt-get install -y awscli
+          fi
+          aws --version
+
+      - name: Upload binaries to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: jump-platform-releases
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -e
+          cd release
+          if [[ -f GUARDIAN_Jump_Setup.exe ]]; then
+            aws s3 cp GUARDIAN_Jump_Setup.exe \
+              "s3://${R2_BUCKET}/releases/v${VERSION}/GUARDIAN_Jump_Setup.exe" \
+              --endpoint-url "${R2_ENDPOINT}" \
+              --no-progress
+            echo "Uploaded Windows exe → releases/v${VERSION}/GUARDIAN_Jump_Setup.exe"
+          fi
+          if [[ -f jump-worker-dashboard-macos.zip ]]; then
+            aws s3 cp jump-worker-dashboard-macos.zip \
+              "s3://${R2_BUCKET}/releases/v${VERSION}/jump-worker-dashboard-macos.zip" \
+              --endpoint-url "${R2_ENDPOINT}" \
+              --no-progress
+            echo "Uploaded macOS zip → releases/v${VERSION}/jump-worker-dashboard-macos.zip"
+          fi
+
+      - name: Register releases in backend (D1)
+        env:
+          ADMIN_BASE_URL: https://api.guardian01.online
+          CF_ACCESS_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          WIN_FILE: ${{ steps.meta.outputs.win_file }}
+          WIN_SIZE: ${{ steps.meta.outputs.win_size }}
+          WIN_SHA: ${{ steps.meta.outputs.win_sha }}
+          MAC_FILE: ${{ steps.meta.outputs.mac_file }}
+          MAC_SIZE: ${{ steps.meta.outputs.mac_size }}
+          MAC_SHA: ${{ steps.meta.outputs.mac_sha }}
+          NOTES: ${{ github.event.head_commit.message }}
+        run: |
+          set -e
+          register() {
+            local platform="$1" filename="$2" size="$3" sha="$4"
+            local r2_key="releases/v${VERSION}/${filename}"
+            local payload
+            payload=$(jq -nc \
+              --arg v "$VERSION" \
+              --arg p "$platform" \
+              --arg k "$r2_key" \
+              --arg f "$filename" \
+              --argjson s "$size" \
+              --arg h "$sha" \
+              --arg n "$NOTES" \
+              '{version:$v, platform:$p, r2_key:$k, filename:$f, size:$s, sha256:$h, notes:$n}')
+
+            echo "Registering $platform release v${VERSION}..."
+            HTTP_CODE=$(curl -s -o /tmp/register_resp.json -w "%{http_code}" \
+              -X POST \
+              -H "Content-Type: application/json" \
+              -H "CF-Access-Client-Id: ${CF_ACCESS_ID}" \
+              -H "CF-Access-Client-Secret: ${CF_ACCESS_SECRET}" \
+              -d "$payload" \
+              "${ADMIN_BASE_URL}/v1/admin/releases")
+
+            cat /tmp/register_resp.json
+            echo ""
+            if [[ "$HTTP_CODE" != "200" ]]; then
+              echo "::error::Backend registration failed (HTTP $HTTP_CODE)"
+              exit 1
+            fi
+          }
+
+          if [[ -n "$WIN_FILE" ]]; then
+            register "windows" "$WIN_FILE" "$WIN_SIZE" "$WIN_SHA"
+          fi
+          if [[ -n "$MAC_FILE" ]]; then
+            register "macos" "$MAC_FILE" "$MAC_SIZE" "$MAC_SHA"
+          fi
