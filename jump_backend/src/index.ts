@@ -256,16 +256,23 @@ async function handlePlatformDomains(req: Request, env: Env): Promise<Response> 
     return unauthorized();
   }
 
-  const rows = await env.DB.prepare("SELECT site_key, domain, updated_at FROM platform_domains ORDER BY site_key").all<{
+  // enabled=true 인 사이트만 클라이언트에게 제공. enabled 상태도 함께 반환.
+  const rows = await env.DB.prepare(
+    "SELECT site_key, domain, updated_at, enabled FROM platform_domains WHERE enabled = 1 ORDER BY site_key"
+  ).all<{
     site_key: string;
     domain: string;
     updated_at: number;
+    enabled: number;
   }>();
 
-  const domains: Record<string, string> = {};
+  const domains: Record<string, { domain: string; enabled: boolean }> = {};
   let maxUpdated = 0;
   for (const r of rows.results || []) {
-    domains[String(r.site_key)] = String(r.domain);
+    domains[String(r.site_key)] = {
+      domain: String(r.domain),
+      enabled: Boolean(Number(r.enabled)),
+    };
     maxUpdated = Math.max(maxUpdated, Number(r.updated_at) || 0);
   }
 
@@ -401,37 +408,67 @@ async function handleAdminPlatformDomains(req: Request, env: Env): Promise<Respo
   }
 
   if (req.method === "GET") {
-    const rows = await env.DB.prepare("SELECT site_key, domain, updated_at FROM platform_domains ORDER BY site_key").all<{
+    const rows = await env.DB.prepare(
+      "SELECT site_key, domain, updated_at, enabled FROM platform_domains ORDER BY site_key"
+    ).all<{
       site_key: string;
       domain: string;
       updated_at: number;
+      enabled: number;
     }>();
-    return json({ ok: true, domains: rows.results || [] });
+    const domains = (rows.results || []).map((r) => ({
+      site_key: r.site_key,
+      domain: r.domain,
+      updated_at: Number(r.updated_at) || 0,
+      enabled: r.enabled == null ? true : Boolean(Number(r.enabled)),
+    }));
+    return json({ ok: true, domains });
   }
 
   if (req.method === "PUT") {
-    const body = await parseJson<{ site_key?: unknown; domain?: unknown }>(req);
+    const body = await parseJson<{ site_key?: unknown; domain?: unknown; enabled?: unknown }>(req);
     if (!body) return badRequest("JSON 형식의 요청 본문이 필요합니다.");
     const siteKey = String(body.site_key || "").trim();
     const domain = normalizeDomain(String(body.domain || ""));
     if (!siteKey) return badRequest("site_key가 비어 있습니다.");
     if (!domain) return badRequest("domain이 비어 있습니다.");
 
+    // enabled: 명시적으로 전달된 경우만 반영, 아니면 기본 1
+    const enabled = body.enabled == null ? 1 : (body.enabled ? 1 : 0);
     const now = nowUnixSeconds();
     await env.DB
       .prepare(
         `
-        INSERT INTO platform_domains(site_key, domain, updated_at)
-        VALUES(?, ?, ?)
+        INSERT INTO platform_domains(site_key, domain, updated_at, enabled)
+        VALUES(?, ?, ?, ?)
         ON CONFLICT(site_key) DO UPDATE SET
           domain = excluded.domain,
-          updated_at = excluded.updated_at
+          updated_at = excluded.updated_at,
+          enabled = excluded.enabled
         `
       )
-      .bind(siteKey, domain, now)
+      .bind(siteKey, domain, now, enabled)
       .run();
 
-    return json({ ok: true, site_key: siteKey, domain, updated_at: now });
+    return json({ ok: true, site_key: siteKey, domain, updated_at: now, enabled: !!enabled });
+  }
+
+  if (req.method === "PATCH") {
+    const body = await parseJson<{ site_key?: unknown; enabled?: unknown }>(req);
+    if (!body) return badRequest("JSON 형식의 요청 본문이 필요합니다.");
+    const siteKey = String(body.site_key || "").trim();
+    if (!siteKey) return badRequest("site_key가 비어 있습니다.");
+    if (body.enabled == null) return badRequest("enabled 필드가 필요합니다.");
+    const enabled = body.enabled ? 1 : 0;
+
+    const now = nowUnixSeconds();
+    const result = await env.DB
+      .prepare("UPDATE platform_domains SET enabled = ?, updated_at = ? WHERE site_key = ?")
+      .bind(enabled, now, siteKey)
+      .run();
+
+    if (!(result.meta?.changes || 0)) return notFound();
+    return json({ ok: true, site_key: siteKey, enabled: !!enabled });
   }
 
   if (req.method === "DELETE") {

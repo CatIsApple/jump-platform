@@ -21,13 +21,13 @@ from ...types import JumpResult, LoginResult
 
 
 class AlbamSite(BaseSite):
-    SITE_NAME = "알밤"
+    SITE_NAME = "아이러브밤"
 
     # ── Login ──
 
     def login(self) -> LoginResult:
         """홈페이지 헤더 로그인 폼(/index.php?act=procMemberLogin) 제출."""
-        self.emit(f"[알밤] 로그인 시작: {self.base_url} (ID: {self.username})", "INFO")
+        self.emit(f"[아이러브밤] 로그인 시작: {self.base_url} (ID: {self.username})", "INFO")
         _acct = {"user_id": self.username, "password": self.password}
 
         try:
@@ -42,7 +42,7 @@ class AlbamSite(BaseSite):
 
         # 이미 로그인 상태인지 확인
         if self.page_contains("로그아웃"):
-            self.emit("[알밤] 이미 로그인 상태입니다.", "INFO")
+            self.emit("[아이러브밤] 이미 로그인 상태입니다.", "INFO")
             return LoginResult(
                 success=True, method="already",
                 message="이미 로그인 상태", account=_acct,
@@ -88,7 +88,7 @@ class AlbamSite(BaseSite):
 
         # 로그인 성공 여부 확인
         if self.page_contains("로그아웃") or self.page_contains("마이페이지"):
-            self.emit("[알밤] 로그인 성공.", "INFO")
+            self.emit("[아이러브밤] 로그인 성공.", "INFO")
             return LoginResult(
                 success=True, method="form",
                 message="로그인 성공", account=_acct,
@@ -143,7 +143,7 @@ class AlbamSite(BaseSite):
             # 횟수 초과 시 더 이상 시도하지 않음
             if result.status == STATUS_COOLDOWN:
                 self.emit(
-                    f"[알밤] 점프 횟수 초과 감지 — 남은 게시물은 건너뜁니다.",
+                    f"[아이러브밤] 점프 횟수 초과 감지 — 남은 게시물은 건너뜁니다.",
                     "WARNING",
                 )
                 break
@@ -151,7 +151,7 @@ class AlbamSite(BaseSite):
 
     def jump_single_post(self, post_url: str) -> JumpResult:
         """하나의 게시물 URL에 대한 점프 실행."""
-        self.emit(f"[알밤] 점프: {post_url}", "INFO")
+        self.emit(f"[아이러브밤] 점프: {post_url}", "INFO")
 
         try:
             self.driver.get(post_url)
@@ -219,7 +219,7 @@ class AlbamSite(BaseSite):
                 int(doc_id),
             )
         except Exception as exc:
-            self.emit(f"[알밤] doCallModuleAction 호출 후 상태: {exc}", "DEBUG")
+            self.emit(f"[아이러브밤] doCallModuleAction 호출 후 상태: {exc}", "DEBUG")
 
         # alert 대기 및 처리
         alert_msg = ""

@@ -1060,11 +1060,21 @@ class WorkerDashboardApp(ctk.CTk):
             # SITE_KEYS에 없는 키는 무시 (예: "오피가이드(개구리)" 등)
             if key not in SITE_KEYS:
                 continue
-            domain = str(v).strip() if v is not None else ""
+
+            # 서버 응답은 두 가지 포맷 지원:
+            #   신규: {"domain": "...", "enabled": bool}
+            #   기존: "domain string"
+            if isinstance(v, dict):
+                domain = str(v.get("domain") or "").strip()
+                server_enabled = bool(v.get("enabled", True))
+            else:
+                domain = str(v).strip() if v is not None else ""
+                # 서버가 이전 포맷이면, 전송된 도메인이 있다는 자체가 enabled 상태
+                server_enabled = bool(domain)
+
             mapping[key] = domain
-            # 로컬에 enabled 상태가 있으면 보존, 없으면 True
-            local_enabled = existing_full.get(key, {}).get("enabled", True)
-            full_mapping[key] = {"domain": domain, "enabled": local_enabled}
+            # 서버의 enabled를 항상 최우선 — 관리자의 비활성화가 즉시 반영되어야 함
+            full_mapping[key] = {"domain": domain, "enabled": server_enabled}
 
         save_platform_domains_full(full_mapping)
         changed = self._apply_domains_to_workflows(mapping)
@@ -1903,11 +1913,11 @@ class WorkerDashboardApp(ctk.CTk):
         self.schedule_chips.grid_columnconfigure(0, weight=1)
         row += 1
 
-        # -- 게시물 URL (알밤 전용) --
+        # -- 게시물 URL (아이러브밤 전용) --
         self._albam_section_divider = self._section_divider(content)
         self._albam_section_divider.grid(row=row, column=0, columnspan=2, sticky="ew", pady=SP["md"])
         row += 1
-        self._albam_section_title = self._section_title(content, "게시물 URL (알밤)")
+        self._albam_section_title = self._section_title(content, "게시물 URL (아이러브밤)")
         self._albam_section_title.grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, SP["md"]))
         row += 1
 
@@ -2077,7 +2087,7 @@ class WorkerDashboardApp(ctk.CTk):
         self._update_albam_section_visibility()
 
     def _update_albam_section_visibility(self) -> None:
-        """선택된 사이트가 알밤일 때만 게시물 URL 섹션을 표시한다."""
+        """선택된 사이트가 아이러브밤일 때만 게시물 URL 섹션을 표시한다."""
         try:
             site = (self.var_site.get() or "").strip()
         except Exception:
@@ -2085,7 +2095,7 @@ class WorkerDashboardApp(ctk.CTk):
         widgets = getattr(self, "_albam_section_widgets", None)
         if not widgets:
             return
-        if site == "알밤":
+        if site == "아이러브밤":
             for w in widgets:
                 try:
                     w.grid()
@@ -2143,7 +2153,7 @@ class WorkerDashboardApp(ctk.CTk):
         if not self._post_urls:
             ctk.CTkLabel(
                 chips,
-                text="등록된 게시물이 없습니다. (알밤 전용)",
+                text="등록된 게시물이 없습니다. (아이러브밤 전용)",
                 font=_font(13),
                 text_color=COLORS["text_4"],
             ).pack(anchor="w", pady=(SP["xs"], 0))
@@ -2599,11 +2609,11 @@ class WorkerDashboardApp(ctk.CTk):
             self.toast("도메인은 필수입니다.", "warning")
             return
 
-        # 알밤은 게시물 URL이 최소 1개 필요
+        # 아이러브밤은 게시물 URL이 최소 1개 필요
         post_urls_for_save: list[str] = []
-        if site_key == "알밤":
+        if site_key == "아이러브밤":
             if not self._post_urls:
-                self.toast("알밤은 게시물 URL을 하나 이상 등록해야 합니다.", "warning")
+                self.toast("아이러브밤은 게시물 URL을 하나 이상 등록해야 합니다.", "warning")
                 return
             post_urls_for_save = list(self._post_urls)
 

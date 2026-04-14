@@ -46,7 +46,7 @@ SITE_REGISTRY: dict[str, type[BaseSite]] = {
     "오피마트": OpmartSite,
     "섹밤": SexbamSite,
     "인천달리기": IndalSite,
-    "알밤": AlbamSite,
+    "아이러브밤": AlbamSite,
 }
 
 

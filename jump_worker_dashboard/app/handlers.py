@@ -196,10 +196,10 @@ def execute_workflow(
     # ── 점프 실행 ──
     try:
         # 알밤: 여러 게시물 URL을 순차 점프
-        if site_key == "알밤" and hasattr(site, "jump_posts"):
+        if site_key == "아이러브밤" and hasattr(site, "jump_posts"):
             post_urls = list(workflow.post_urls or [])
             if not post_urls:
-                return "failed", "알밤: 게시물 URL이 등록되지 않았습니다. 작업 설정에서 URL을 추가하세요."
+                return "failed", "아이러브밤: 게시물 URL이 등록되지 않았습니다. 작업 설정에서 URL을 추가하세요."
 
             results = site.jump_posts(post_urls)
             total = len(post_urls)
@@ -208,7 +208,7 @@ def execute_workflow(
             fail_cnt = sum(1 for _, r in results if r.status in ("failed", "login_required"))
 
             emit(
-                f"[알밤] 완료: {success_cnt}/{total} 성공, "
+                f"[아이러브밤] 완료: {success_cnt}/{total} 성공, "
                 f"{cooldown_cnt} 초과, {fail_cnt} 실패",
                 "INFO",
             )
