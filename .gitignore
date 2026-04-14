@@ -43,3 +43,11 @@ jump_worker_dashboard/data/*.token
 jump_backend/.wrangler/
 jump_backend/.dev.vars
 jump_admin_tui/.venv/
+
+# Claude skills 시크릿 (절대 commit 금지)
+.claude/secrets.local.md
+.claude/*.secret
+.claude/**/secrets.*
+
+# 로컬 업데이트 테스트 백업
+jump_worker_dashboard/dist_*_backup/
