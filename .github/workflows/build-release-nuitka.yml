@@ -326,9 +326,12 @@ jobs:
               '{version:$v, platform:$p, r2_key:$k, filename:$f, size:$s, sha256:$h, notes:$n}')
 
             echo "Registering $platform release v${VERSION}..."
+            # User-Agent 명시 — 미기재 시 CF Bot Management가 challenge 반환
             HTTP_CODE=$(curl -s -o /tmp/register_resp.json -w "%{http_code}" \
               -X POST \
+              -A "jump-platform-ci/1.0 (github-actions)" \
               -H "Content-Type: application/json" \
+              -H "Accept: application/json" \
               -H "CF-Access-Client-Id: ${CF_ACCESS_ID}" \
               -H "CF-Access-Client-Secret: ${CF_ACCESS_SECRET}" \
               -d "$payload" \
