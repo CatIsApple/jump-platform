@@ -120,6 +120,9 @@ SETTING_BACKEND_TOKEN = "backend_token"
 SETTING_BACKEND_COMPANY = "backend_company_name"
 SETTING_BACKEND_EXPIRES_AT = "backend_expires_at"
 SETTING_BACKEND_STATUS = "backend_status"
+# 업데이트 직전에 notes를 저장 → 새 버전 실행 시 한 번만 표시
+SETTING_PENDING_UPDATE_VERSION = "pending_update_version"
+SETTING_PENDING_UPDATE_NOTES = "pending_update_notes"
 
 
 # ---------------------------
@@ -297,8 +300,25 @@ class ConfirmDialog(ctk.CTkToplevel):
         super().__init__(parent)
         self._result: Optional[bool] = None
         self.title(title)
-        self.geometry("440x210")
-        self.resizable(False, False)
+
+        # 메시지 길이 기반 동적 크기 (줄 수 + 최장 줄 너비 고려)
+        lines = (message or "").split("\n")
+        line_count = len(lines)
+        max_line_chars = max((len(ln) for ln in lines), default=0)
+
+        # 최소/최대 폭 + 줄별 높이
+        width = max(520, min(800, 280 + max_line_chars * 9))
+        # 폭 기준 wraplength 계산 (padding 제외)
+        wraplength = width - 2 * (SP["xl"] + SP["2xl"]) - 16
+        # 줄바꿈 고려해서 실제 표시 줄 수 추정
+        approx_lines = sum(
+            max(1, (len(ln) * 9) // max(1, wraplength - 20) + 1) for ln in lines
+        )
+        height = max(220, min(640, 120 + approx_lines * 22 + 80))
+
+        self.geometry(f"{width}x{height}")
+        self.minsize(480, 200)
+        self.resizable(True, True)
         self.configure(fg_color=COLORS["bg"])
 
         self.transient(parent)
@@ -313,17 +333,9 @@ class ConfirmDialog(ctk.CTkToplevel):
         )
         container.pack(fill="both", expand=True, padx=SP["xl"], pady=SP["xl"])
 
-        ctk.CTkLabel(
-            container,
-            text=message,
-            font=_font(13),
-            text_color=COLORS["text"],
-            justify="left",
-            wraplength=370,
-        ).pack(anchor="w", padx=SP["2xl"], pady=(SP["2xl"], SP["lg"]))
-
+        # 버튼 행 먼저 pack (side=bottom) — 메시지가 길어도 버튼이 항상 보이게
         btn_row = ctk.CTkFrame(container, fg_color="transparent")
-        btn_row.pack(side="bottom", fill="x", padx=SP["2xl"], pady=(0, SP["2xl"]))
+        btn_row.pack(side="bottom", fill="x", padx=SP["2xl"], pady=(SP["md"], SP["2xl"]))
 
         ctk.CTkButton(
             btn_row,
@@ -348,6 +360,23 @@ class ConfirmDialog(ctk.CTkToplevel):
             font=_font(13),
             command=self._cancel,
         ).pack(side="right", padx=(0, SP["sm"]))
+
+        # 메시지는 버튼 위에 스크롤 가능한 영역으로
+        msg_scroll = ctk.CTkScrollableFrame(
+            container,
+            fg_color="transparent",
+            scrollbar_button_color=COLORS["border"],
+        )
+        msg_scroll.pack(fill="both", expand=True, padx=SP["2xl"], pady=(SP["2xl"], 0))
+
+        ctk.CTkLabel(
+            msg_scroll,
+            text=message,
+            font=_font(13),
+            text_color=COLORS["text"],
+            justify="left",
+            wraplength=wraplength,
+        ).pack(anchor="w")
 
         self.protocol("WM_DELETE_WINDOW", self._cancel)
 
@@ -692,8 +721,9 @@ class WorkerDashboardApp(ctk.CTk):
         self.current_view = "ops"
 
         self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)  # row=0은 배너, row=1이 메인
 
+        self._build_update_banner()
         self._build_sidebar()
         self._build_container()
         self._build_view_ops()
@@ -927,8 +957,53 @@ class WorkerDashboardApp(ctk.CTk):
 
     # ─── 자동 업데이트 ────────────────────────────────────────
 
+    def _show_whats_new_if_applicable(self) -> None:
+        """업데이트 직후 첫 실행 시 'What's New' 다이얼로그 표시 (한 번만)."""
+        try:
+            pending_ver = self.db.get_setting(SETTING_PENDING_UPDATE_VERSION, "").strip()
+            pending_notes = self.db.get_setting(SETTING_PENDING_UPDATE_NOTES, "").strip()
+        except Exception:
+            return
+
+        if not pending_ver:
+            return
+
+        # 현재 실행 중 버전이 pending 버전과 일치하면 → 업데이트 완료
+        if pending_ver == APP_VERSION:
+            # DB clear (한 번만 표시)
+            try:
+                self.db.set_setting(SETTING_PENDING_UPDATE_VERSION, "")
+                self.db.set_setting(SETTING_PENDING_UPDATE_NOTES, "")
+            except Exception:
+                pass
+
+            msg = (
+                f"🎉 v{APP_VERSION} 업데이트 완료\n\n"
+                f"{pending_notes if pending_notes else '(업데이트 내용 정보 없음)'}\n\n"
+                f"불편 사항이 있으면 관리자에게 문의해주세요."
+            )
+            try:
+                # 비동기로 표시 (UI 안정화 후)
+                self.after(1500, lambda: self._show_whats_new_dialog(APP_VERSION, msg))
+            except Exception:
+                pass
+
+    def _show_whats_new_dialog(self, version: str, message: str) -> None:
+        """업데이트 완료 다이얼로그 (확인 버튼 하나)."""
+        try:
+            dialog = ConfirmDialog(self, f"업데이트 완료 v{version}", message)
+            self.wait_window(dialog)
+        except Exception:
+            pass
+
     def _kickoff_update_check(self) -> None:
-        """앱 시작 후 백그라운드 업데이트 체크 + 30분마다 재확인."""
+        """앱 시작 후 백그라운드 업데이트 체크 + 30분마다 재확인.
+
+        첫 호출 때 What's New 다이얼로그도 함께 표시.
+        """
+        # 첫 호출 시 What's New 체크 (이후 30분 주기 호출에서는 영향 없음 — pending이 비어있음)
+        self._show_whats_new_if_applicable()
+        self.log_bus.emit("[업데이트] 자동 확인 시작...", "INFO")
         threading.Thread(
             target=self._update_check_worker,
             name="update-check",
@@ -944,56 +1019,55 @@ class WorkerDashboardApp(ctk.CTk):
         try:
             base_url = normalize_base_url(self.db.get_setting(SETTING_BACKEND_BASE_URL, ""))
             token = self.db.get_setting(SETTING_BACKEND_TOKEN, "").strip()
-            if not base_url or not token:
+            if not base_url:
+                self.log_bus.emit("[업데이트] 서버 주소가 설정되지 않아 체크 건너뜀.", "INFO")
                 return
+            if not token:
+                self.log_bus.emit("[업데이트] 로그인 전이라 체크 건너뜀.", "INFO")
+                return
+
+            self.log_bus.emit(
+                f"[업데이트] 확인 중... (현재 v{APP_VERSION}, 플랫폼: {updater.detect_platform()})",
+                "INFO",
+            )
 
             try:
                 info = updater.check_latest_version(base_url, token, timeout_s=10.0)
             except updater.UpdateError as exc:
-                # 인증 만료 등은 무시 (heartbeat가 처리)
-                self.log_bus.emit(f"[업데이트] 체크 실패: {exc}", "DEBUG")
+                self.log_bus.emit(f"[업데이트] 체크 실패: {exc}", "WARNING")
                 return
             except Exception as exc:
-                self.log_bus.emit(f"[업데이트] 예외: {exc}", "DEBUG")
+                self.log_bus.emit(f"[업데이트] 예외: {exc}", "WARNING")
                 return
 
             if info is None:
+                self.log_bus.emit(
+                    "[업데이트] 서버에 등록된 릴리즈가 없습니다.",
+                    "INFO",
+                )
                 return
 
             if updater._is_newer(info.version, APP_VERSION):
                 self._latest_update = info
-                # UI 업데이트는 메인 스레드에서
-                self.after(0, self._show_update_badge)
+                self.log_bus.emit(
+                    f"[업데이트] 새 버전 발견: v{info.version} (현재 v{APP_VERSION})",
+                    "INFO",
+                )
+                self.after(0, lambda i=info: self._show_update_banner(i))
             else:
                 self.log_bus.emit(
-                    f"[업데이트] 최신 버전입니다 (현재: v{APP_VERSION})",
-                    "DEBUG",
+                    f"[업데이트] 이미 최신 버전입니다. (v{APP_VERSION} / 서버 v{info.version})",
+                    "INFO",
                 )
         finally:
             self._update_check_lock.release()
 
     def _show_update_badge(self) -> None:
-        """업데이트 발견 시 사이드바에 배지 표시."""
+        """하위 호환용 — 실제로는 배너 표시."""
         info = self._latest_update
         if info is None:
             return
-        try:
-            self.btn_update.configure(text=f"업데이트 가능 v{info.version}")
-            # 이미 pack 됐는지 체크
-            if not self.btn_update.winfo_ismapped():
-                # 버전 라벨 위에 삽입 (같은 부모, before=lbl_version)
-                self.btn_update.pack(
-                    fill="x",
-                    padx=SP["sm"],
-                    pady=(0, SP["md"]),
-                    before=self.lbl_version,
-                )
-        except Exception:
-            pass
-        self.log_bus.emit(
-            f"[업데이트] 새 버전 발견: v{info.version} (현재 v{APP_VERSION})",
-            "INFO",
-        )
+        self._show_update_banner(info)
 
     def _on_update_click(self) -> None:
         """업데이트 배지 클릭 → 확인 모달 → 다운로드 + 설치."""
@@ -1040,6 +1114,13 @@ class WorkerDashboardApp(ctk.CTk):
             self._update_in_progress = False
             self.after(0, lambda: self.toast("로그인이 필요합니다.", "error"))
             return
+
+        # 다운로드 시작 직전 — 새 버전 첫 실행 시 표시할 notes를 DB에 저장
+        try:
+            self.db.set_setting(SETTING_PENDING_UPDATE_VERSION, info.version)
+            self.db.set_setting(SETTING_PENDING_UPDATE_NOTES, info.notes or "")
+        except Exception:
+            pass
 
         dest = updater.get_download_dir() / info.filename
 
@@ -1090,16 +1171,8 @@ class WorkerDashboardApp(ctk.CTk):
             ))
 
     def _update_progress(self, pct: int) -> None:
-        """다운로드 진행률을 배지에 표시 (-1 = 실패)."""
-        try:
-            if pct < 0:
-                self.btn_update.configure(text=f"업데이트 가능 v{self._latest_update.version}")
-            elif pct >= 100:
-                self.btn_update.configure(text="설치 준비 중...")
-            else:
-                self.btn_update.configure(text=f"다운로드 중... {pct}%")
-        except Exception:
-            pass
+        """다운로드 진행률을 배너에 표시 (-1 = 실패)."""
+        self._set_update_banner_progress(pct)
 
     # ─── ────────────────────────────────────────────────────
 
@@ -1355,6 +1428,132 @@ class WorkerDashboardApp(ctk.CTk):
 
     # ===== Sidebar =====
 
+    def _build_update_banner(self) -> None:
+        """상단 업데이트 알림 배너 (기본 숨김)."""
+        self.update_banner = ctk.CTkFrame(
+            self,
+            fg_color="#1e3a5f",
+            corner_radius=0,
+            height=44,
+        )
+        self.update_banner.grid_columnconfigure(0, weight=1)
+        # 기본 숨김 (grid_remove로 저장된 위치 기억)
+        self.update_banner.grid(row=0, column=0, columnspan=2, sticky="ew")
+        self.update_banner.grid_remove()
+
+        # 좌측: 아이콘 + 메시지
+        left = ctk.CTkFrame(self.update_banner, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="w", padx=SP["xl"], pady=SP["sm"])
+
+        ctk.CTkLabel(
+            left, text="✨",
+            font=_font(14),
+            text_color="#60a5fa",
+        ).pack(side="left", padx=(0, SP["sm"]))
+
+        self.update_banner_msg = ctk.CTkLabel(
+            left,
+            text="새 버전이 있습니다.",
+            font=_font(13),
+            text_color="#ffffff",
+            anchor="w",
+        )
+        self.update_banner_msg.pack(side="left")
+
+        # 우측: 업데이트 / 나중에 / 닫기
+        right = ctk.CTkFrame(self.update_banner, fg_color="transparent")
+        right.grid(row=0, column=1, sticky="e", padx=SP["xl"], pady=SP["sm"])
+
+        self.update_banner_btn = ctk.CTkButton(
+            right,
+            text="지금 업데이트",
+            height=28,
+            width=108,
+            fg_color="#3b82f6",
+            hover_color="#2563eb",
+            corner_radius=6,
+            font=_font(12, "bold"),
+            text_color="#ffffff",
+            command=self._on_update_click,
+        )
+        self.update_banner_btn.pack(side="left", padx=(0, SP["sm"]))
+
+        ctk.CTkButton(
+            right,
+            text="나중에",
+            height=28,
+            width=56,
+            fg_color="transparent",
+            hover_color="#5f606200",
+            corner_radius=6,
+            font=_font(12),
+            text_color="#cbd5e1",
+            command=self._hide_update_banner,
+        ).pack(side="left", padx=(0, SP["sm"]))
+
+        ctk.CTkButton(
+            right,
+            text="✕",
+            height=28,
+            width=28,
+            fg_color="transparent",
+            hover_color="#2a4a7f",
+            corner_radius=6,
+            font=_font(12),
+            text_color="#94a3b8",
+            command=self._hide_update_banner,
+        ).pack(side="left")
+
+    def _show_update_banner(self, info) -> None:
+        """업데이트 발견 시 배너 표시."""
+        try:
+            self.update_banner_msg.configure(
+                text=f"새 버전 v{info.version} 사용 가능 (현재 v{APP_VERSION})",
+            )
+            self.update_banner_btn.configure(text=f"지금 업데이트")
+            self.update_banner.grid()
+        except Exception:
+            pass
+
+    def _hide_update_banner(self) -> None:
+        try:
+            self.update_banner.grid_remove()
+        except Exception:
+            pass
+
+    def _set_update_banner_progress(self, pct: int) -> None:
+        """다운로드 진행률 배너 표시."""
+        try:
+            if pct < 0:
+                info = self._latest_update
+                if info:
+                    self.update_banner_btn.configure(
+                        text="지금 업데이트", state="normal", text_color="#ffffff"
+                    )
+                    self.update_banner_msg.configure(
+                        text=f"새 버전 v{info.version} 사용 가능 (현재 v{APP_VERSION}) — 다운로드 실패",
+                        text_color="#ffffff",
+                    )
+            elif pct >= 100:
+                self.update_banner_btn.configure(
+                    text="설치 중...", state="normal", text_color="#ffffff"
+                )
+                self.update_banner_msg.configure(
+                    text="설치 준비 중...", state="normal", text_color="#ffffff"
+                )
+            else:
+                self.update_banner_btn.configure(
+                    text=f"다운로드 {pct}%", state="normal", text_color="#ffffff"
+                )
+                info = self._latest_update
+                if info:
+                    self.update_banner_msg.configure(
+                        text=f"v{info.version} 다운로드 중... {pct}%",
+                        text_color="#ffffff",
+                    )
+        except Exception:
+            pass
+
     def _build_sidebar(self) -> None:
         sidebar = ctk.CTkFrame(
             self,
@@ -1363,7 +1562,7 @@ class WorkerDashboardApp(ctk.CTk):
             corner_radius=0,
             border_width=0,
         )
-        sidebar.grid(row=0, column=0, sticky="nsew")
+        sidebar.grid(row=1, column=0, sticky="nsew")
         sidebar.grid_propagate(False)
 
         # Separator line on right edge
@@ -1536,21 +1735,7 @@ class WorkerDashboardApp(ctk.CTk):
             command=self._backend_logout,
         ).pack(fill="x", padx=SP["sm"], pady=(0, SP["md"]))
 
-        # 업데이트 배지 (기본 숨김 — 새 버전 발견 시 표시)
-        self.btn_update = ctk.CTkButton(
-            bottom,
-            text="업데이트 가능",
-            height=STYLES["button_height"],
-            fg_color="#1e3a5f",
-            hover_color="#2563eb",
-            border_width=1,
-            border_color="#3b82f6",
-            corner_radius=STYLES["button_radius"],
-            font=_font(13, "bold"),
-            text_color="#60a5fa",
-            command=self._on_update_click,
-        )
-        # pack 안 함 — 업데이트 발견 시 _show_update_badge에서 pack
+        # 업데이트 알림은 상단 배너로 전환 (_build_update_banner)
 
         # 버전 라벨
         self.lbl_version = ctk.CTkLabel(
@@ -1565,7 +1750,7 @@ class WorkerDashboardApp(ctk.CTk):
 
     def _build_container(self) -> None:
         self.container = ctk.CTkFrame(self, fg_color=COLORS["bg"], corner_radius=0)
-        self.container.grid(row=0, column=1, sticky="nsew")
+        self.container.grid(row=1, column=1, sticky="nsew")
         self.container.grid_rowconfigure(0, weight=1)
         self.container.grid_columnconfigure(0, weight=1)
 
@@ -2613,7 +2798,7 @@ class WorkerDashboardApp(ctk.CTk):
             ctk.CTkLabel(
                 right_actions,
                 text=wf.site_key,
-                font=_font(10),
+                font=_font(13),
                 text_color=COLORS["accent"],
                 fg_color=COLORS["accent_soft"],
                 corner_radius=4,
@@ -2621,21 +2806,6 @@ class WorkerDashboardApp(ctk.CTk):
                 pady=1,
                 height=20,
             ).pack(side="right")
-
-            ctk.CTkButton(
-                right_actions,
-                text="▶ 실행",
-                width=64,
-                height=22,
-                fg_color="transparent",
-                hover_color=COLORS["card_hover"],
-                border_width=1,
-                border_color=COLORS["border"],
-                corner_radius=6,
-                font=_font(14, "bold"),
-                text_color=COLORS["text_2"],
-                command=lambda wid=int(wf.id): self._run_workflow_now(wid),
-            ).pack(side="right", padx=(SP["sm"], 0))
 
             # Bottom row: domain + schedule
             bottom_row = ctk.CTkFrame(item, fg_color="transparent")

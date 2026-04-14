@@ -62,11 +62,11 @@ HTML에서 프레임워크 감지:
 
 프레임워크별 참고 구현 (이미 검증됨):
 
-| 프레임워크 | 단순 | 복잡 (alert+파싱) | JS 기반 점프 | 멀티 포스트 |
-|---|---|---|---|---|
-| gnuboard | `bamje`, `indal` | `busanbibigi`, `opguide` | `obam` | - |
-| XE | `sexbam` | `albam` (아이러브밤) | `albam` | `albam` |
-| Laravel | - | `daegubam` | - | - |
+| 프레임워크 | 단순 | 복잡 (alert+파싱) | JS 기반 점프 | 멀티 포스트 | 팝업 처리 |
+|---|---|---|---|---|---|
+| gnuboard | `bamje`, `indal` | `busanbibigi`, `opguide` | `obam` | - | `obam` (hd_pop 제거) |
+| XE | `sexbam` | `albam` (아이러브밤) | `albam` | `albam` | - |
+| Laravel | - | `daegubam` (대구의밤) | - | - | - |
 
 **반드시 유사 사이트의 `site.py`를 먼저 읽고 패턴을 재사용**. 새 패턴 억지로 만들지 말 것.
 
@@ -323,11 +323,14 @@ git push origin vX.Y.Z
 | 요구사항 | 참고 사이트 | 주요 기법 |
 |---|---|---|
 | gnuboard 단순 점프 | `bamje`, `indal` | URL 이동 + alert |
-| gnuboard 카운트 비교 | `busanbibigi` | before/after 파싱 |
-| gnuboard JS 함수 | `obam` | `jump_shop(wr_id)` JS 호출 |
-| XE 멀티 포스트 | `albam` (아이러브밤) | `jump_posts(urls)` + document_srl |
-| XE 단일 점프 | `sexbam` | `doCallModuleAction` |
+| gnuboard 카운트 비교 | `busanbibigi` (부산비비기) | before/after 파싱 |
+| gnuboard JS 함수 호출 | `obam` (오밤) | `jump_shop(wr_id)` JS + 팝업 제거 |
+| XE 멀티 포스트 | `albam` (아이러브밤) | `jump_posts(urls)` + document_srl 추출 |
+| XE 단일 점프 | `sexbam` (섹밤) | `doCallModuleAction` |
 | Laravel 폼 제출 | `daegubam` (대구의밤) | CSRF `_token` + form.submit() |
+| 팝업 처리 (모달/오버레이) | `obam` | `_dismiss_popups()` JS로 요소 제거 |
+| URL rewrite 지원 | `albam` | `/store/12345`, `/board_xx/12345`, `/prepr/12345` 전부 추출 |
+| DOM 기반 로그인 판별 | `albam`, `daegubam` | 텍스트 매칭 대신 요소 존재 여부 체크 |
 | 자동 도메인 전환 방어 | 모든 사이트 | handlers.py에서 `_maybe_switch_announced_domain` 비활성 |
 
 ---

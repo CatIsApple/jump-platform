@@ -1,47 +1,59 @@
 ---
 name: release
-description: jump-platform의 버전 릴리즈 전체 자동화. 버전 번호만 받으면 pyproject.toml + __init__.py 업데이트, 커밋, 태그 푸시, GitHub Actions로 Nuitka + Inno Setup 빌드 + R2 업로드 + D1 등록까지 진행. 릴리즈 후 클라이언트는 자동 업데이트 알림을 받음. 사용 시점: 사용자가 "릴리즈", "배포", "업데이트 릴리즈", "버전 올려", "v0.x.x 배포", "배포 진행" 등을 요청할 때.
+description: jump-platform의 버전 릴리즈 전체 자동화. 버전 번호만 받으면 pyproject.toml + __init__.py 업데이트, 커밋, 태그 푸시, GitHub Actions로 Nuitka + Inno Setup 빌드 + R2 업로드 + D1 등록까지 진행. 릴리즈 후 클라이언트는 상단 파란 배너로 업데이트 알림을 받고, 설치 후 What's New 다이얼로그로 변경사항을 자동 표시. 사용 시점: 사용자가 "릴리즈", "배포", "업데이트 릴리즈", "버전 올려", "v0.x.x 배포", "배포 진행" 등을 요청할 때.
 ---
 
 # Release Skill — jump-platform 자동 릴리즈
 
 jump-platform 프로젝트의 전체 릴리즈 사이클을 자동화합니다.
 
-## 전제 조건 (이미 설정되어 있음)
+## 전제 조건 (이미 설정됨)
 
 - **GitHub 리포**: `CatIsApple/jump-platform` (private)
 - **CF Worker**: `api.guardian01.online` (R2 binding + D1)
-- **R2 버킷**: `jump-platform-releases`
+- **R2 버킷**: `jump-platform-releases` (private)
+- **D1 DB**: `jump_backend_db` (id `ae50d38a-4435-42f7-8d55-05159dc1397f`)
 - **GitHub Secrets** (설정 완료):
   - `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ENDPOINT`
   - `CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`
   - `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`
 - **워크플로우**:
-  - `.github/workflows/build-release-nuitka.yml` — tag push 시 실행
-  - `.github/workflows/build-worker-binaries.yml` — main push 시 빠른 검증
+  - `.github/workflows/build-release-nuitka.yml` — tag push 시 Nuitka 빌드 + R2 + D1 자동 등록
+  - `.github/workflows/build-worker-binaries.yml` — main push 시 빠른 PyInstaller 검증
+
+## 클라이언트 자동 업데이트 흐름
+
+릴리즈 태그 푸시 후 약 30분 내 모든 클라이언트:
+
+1. 30분 주기 heartbeat로 세션 체크
+2. `GET /v1/updates/latest?platform={windows|macos}` 폴링
+3. 새 버전 감지 → 상단 파란 배너에 "✨ 새 버전 vX.Y.Z 사용 가능"
+4. 사용자 "지금 업데이트" 클릭 → 다이얼로그에 `notes` 표시 → 확인
+5. Worker 프록시로 R2 바이너리 스트리밍 다운로드 (Bearer 인증)
+6. sha256 무결성 검증
+7. **macOS**: `ditto -x -k`로 zip 해제 → 기존 .app 백업 → ditto 복사 → chmod → xattr -cr → lsregister -f → open 재시작
+8. **Windows**: PowerShell 헬퍼가 부모 종료 대기 → setup.exe `/VERYSILENT /SUPPRESSMSGBOXES` → 설치 wait → 새 exe 자동 실행
+9. 새 버전 첫 실행 시 1.5초 후 **"🎉 vX.Y.Z 업데이트 완료" What's New 다이얼로그** (DB에 저장된 notes 재표시, 한 번만)
 
 ## 워크플로우
 
 ### 1단계: 현재 버전 파악 + 다음 버전 결정
 
 ```bash
-# 현재 버전 확인 (두 곳 동기화되어 있어야 함)
 grep __version__ jump_worker_dashboard/__init__.py
 grep ^version jump_worker_dashboard/pyproject.toml
 ```
 
 **버전 증분 규칙**:
 - **patch** (0.8.0 → 0.8.1): 버그 수정만
-- **minor** (0.8.0 → 0.9.0): 새 사이트 추가, 기능 추가, UI 변경
-- **major** (0.8.0 → 1.0.0): 구조적 변경, 호환성 깨짐
-
-사용자가 버전을 명시하지 않으면 변경 내용 기반으로 제안.
+- **minor** (0.8.0 → 0.9.0): 새 사이트 추가, UI 변경, 기능 추가
+- **major** (0.x → 1.0): 구조 변경, 호환성 깨짐
 
 ### 2단계: 버전 동기화
 
 두 파일을 **동시에** 업데이트:
 
-```python
+```
 # jump_worker_dashboard/__init__.py
 __version__ = "NEW_VERSION"
 
@@ -49,33 +61,41 @@ __version__ = "NEW_VERSION"
 version = "NEW_VERSION"
 ```
 
-### 3단계: 변경사항 요약 (git diff)
+### 3단계: 릴리즈 노트 작성 (유저에게 보여짐)
 
-```bash
-git diff HEAD --stat
-git log --oneline main..HEAD  # 커밋 있으면
+**⚠️ 중요**: `build-release-nuitka.yml`에서 `NOTES: ${{ github.event.head_commit.message }}`로 커밋 메시지를 notes로 사용. 커밋 메시지가 그대로 "What's New" 다이얼로그에 표시되므로 **유저 친화적으로 작성**해야 함.
+
+좋은 notes 예시:
 ```
+🎉 v1.0.0 정식 버전 출시!
 
-변경 내용을 요약해서 커밋 메시지 작성. 형식:
+새로 추가된 기능:
+• 자동 업데이트 시스템 (업데이트 있을 때 알림 배너 표시)
+• 대구의밤, 오밤 사이트 지원
+• What's New 다이얼로그로 변경사항 안내
 
-```
-chore: bump version to vX.Y.Z
+버그 수정:
+• macOS 재시작 안정성 개선
+• 서버 동기화 SSL 인증 오류 수정
+• 로그아웃 후 자동 재로그인 방지
 
-Changes since last release:
-- feat(sites): added 대구의밤 (eorn3.com)
-- fix(ui): logout button colors
-- feat(updater): auto-update system
-
-Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+감사합니다! 🚀
 ```
 
 ### 4단계: 커밋 + 태그 푸시 (1줄로 릴리즈)
 
 ```bash
 git add jump_worker_dashboard/__init__.py jump_worker_dashboard/pyproject.toml
+
+# notes가 될 커밋 메시지 (유저 친화적)
 git commit -m "$(cat <<'EOF'
-chore: bump version to vX.Y.Z
-...
+🎉 vX.Y.Z 출시
+
+새 기능:
+• ...
+
+버그 수정:
+• ...
 EOF
 )"
 git push origin main
@@ -83,14 +103,6 @@ git push origin main
 git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
-
-태그 푸시 시 GitHub Actions 자동 실행:
-1. **build-macos** (PyInstaller, ~5분) — `jump-worker-dashboard-macos.zip`
-2. **build-windows-nuitka** (Nuitka + Inno Setup, ~30분) — `GUARDIAN_Jump_Setup.exe`
-3. **release** (Ubuntu):
-   - GitHub Release 생성 + 자산 첨부
-   - `aws s3 cp` → R2 업로드 (`releases/vX.Y.Z/`)
-   - `POST /v1/admin/releases` → D1 메타데이터 등록
 
 ### 5단계: 빌드 모니터링
 
@@ -100,93 +112,110 @@ RUN_ID=$(gh api repos/CatIsApple/jump-platform/actions/runs --jq '[.workflow_run
 gh api repos/CatIsApple/jump-platform/actions/runs/$RUN_ID/jobs --jq '.jobs[] | "\(.name) | \(.conclusion // "running")"'
 ```
 
-Windows Nuitka가 가장 오래 걸리므로 약 30~35분 기다려야 함. `run_in_background: true`로 polling 추천.
+약 30~35분 소요 (Windows Nuitka). `run_in_background: true`로 polling.
 
 ### 6단계: 릴리즈 검증
 
-빌드 완료 후:
-
 ```bash
-# GitHub Release 확인
+# GitHub Release
 gh api repos/CatIsApple/jump-platform/releases/latest --jq '.tag_name, .html_url'
 
-# R2 업로드 확인
-curl -s -H "CF-Access-Client-Id: ..." -H "CF-Access-Client-Secret: ..." \
-  https://api.guardian01.online/v1/admin/releases | \
+# R2 + D1 등록 확인
+curl -s -H "CF-Access-Client-Id: fc1aa72f3308d25496c24f5ba6e9eae3.access" \
+     -H "CF-Access-Client-Secret: 0626ec1116c10885e4e88300885619cd9c0fd74b167b4ebc90767da201da6895" \
+     https://api.guardian01.online/v1/admin/releases | \
   python3 -c "import sys, json; [print(r['version'], r['platform'], r['size']) for r in json.load(sys.stdin)['releases'][:4]]"
 
-# 클라이언트 관점 테스트 (라이센스 로그인 후)
-curl -s -H "Authorization: Bearer TOKEN" https://api.guardian01.online/v1/updates/latest?platform=macos
+# 클라이언트 관점 (테스트 라이센스로 로그인 후)
+curl -s -H "Authorization: Bearer TOKEN" "https://api.guardian01.online/v1/updates/latest?platform=macos"
 ```
 
-## 긴급 롤백
+## 로컬 빠른 테스트 (CI 30분 대기 피하기)
 
-잘못된 릴리즈를 배포 중지해야 할 때:
-
-```bash
-# D1에서 unpublish (서버 측)
-curl -X POST -H "CF-Access-Client-Id: ..." -H "CF-Access-Client-Secret: ..." \
-  https://api.guardian01.online/v1/admin/releases/{ID}/unpublish
-
-# 또는 태그 삭제 (GitHub)
-git tag -d vX.Y.Z
-git push origin :refs/tags/vX.Y.Z
-gh release delete vX.Y.Z -R CatIsApple/jump-platform --yes
-```
-
-## 빠른 재시도 (빌드 실패 시)
-
-같은 태그에 재시도:
+### 로컬 macOS 빌드 + R2 수동 업로드 + D1 등록
 
 ```bash
-# 코드 수정 후
-git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z
-git commit --amend   # 또는 새 커밋
-git push origin main
-git tag vX.Y.Z && git push origin vX.Y.Z
-```
+cd jump_worker_dashboard
 
-## 시크릿 값
+# 1. 로컬 빌드
+./scripts/build_macos.sh
 
-> **⚠️ 모든 민감정보는 `.claude/secrets.local.md` 파일에 저장되어 있음 (gitignore).**
-> skill 실행 전 이 파일을 먼저 읽어 필요한 값을 참조.
+# 2. 메타데이터 계산
+ZIP=dist/jump-worker-dashboard-macos.zip
+SIZE=$(stat -f%z "$ZIP")
+SHA=$(shasum -a 256 "$ZIP" | awk '{print $1}')
 
-포함된 내용:
-- Cloudflare Account ID, Global API Key, R2 Access Keys, S3 endpoint
-- CF Access Client ID/Secret (관리자 API 호출용)
-- D1 Database ID, R2 Bucket 정보
-- 자주 쓰는 명령어 스니펫 (wrangler deploy, D1 execute, R2 upload, admin API curl)
+# 3. R2 업로드
+cd ../jump_backend
+CLOUDFLARE_API_KEY="ae832649cb729e7decfc0cbb487f6171d9897" \
+CLOUDFLARE_EMAIL="tiok0812@gmail.com" \
+CLOUDFLARE_ACCOUNT_ID="9606dcd69b23133a781ed46f4588f94a" \
+npx wrangler r2 object put \
+  jump-platform-releases/releases/vX.Y.Z/jump-worker-dashboard-macos.zip \
+  --file "../jump_worker_dashboard/$ZIP" --remote
 
-추가 참조:
-- `~/.config/jump_admin_tui/config.json` — Admin TUI/Web이 사용하는 설정
-- `~/.wrangler/config` — wrangler CLI 세션 캐시
-- GitHub Secrets — CI 빌드 시 자동 주입 (R2/CF Access)
-
-## 자주 하는 실수
-
-1. **버전 불일치**: `__init__.py`와 `pyproject.toml` 둘 다 업데이트 해야 함
-2. **태그 누락**: `git push origin main`만 하면 Nuitka 빌드 안 됨, `git tag` + `git push origin TAG` 필수
-3. **Inno Setup 실패**: `.iss` 수정 후에는 로컬 검증 없이 CI만 돌리면 발견 늦음
-4. **R2 업로드 실패**: GitHub Secrets 만료/변경 시 Actions 로그에서 "403 Forbidden" 확인
-5. **같은 버전 재등록**: `ON CONFLICT DO UPDATE`라 덮어써짐 (의도치 않게 덮어쓰지 않도록 주의)
-
-## 테스트 목적 로컬 릴리즈 (실제 사용자에게 영향 없음)
-
-개발 중 업데이트 흐름을 테스트하려면:
-
-```bash
-# 1. 로컬 macOS 빌드
-cd jump_worker_dashboard && ./scripts/build_macos.sh
-
-# 2. 로컬에서 R2 업로드
-npx wrangler r2 object put jump-platform-releases/releases/vTEST/... \
-  --file dist/jump-worker-dashboard-macos.zip --remote
-
-# 3. D1 등록 (size, sha256 계산 후)
-SIZE=$(stat -f%z dist/jump-worker-dashboard-macos.zip)
-SHA=$(shasum -a 256 dist/jump-worker-dashboard-macos.zip | awk '{print $1}')
-curl -X POST -d "{\"version\":\"TEST\",\"platform\":\"macos\",\"r2_key\":\"...\",...}" \
+# 4. D1 등록
+NOTES="업데이트 내용..."
+curl -s -X POST -H "CF-Access-Client-Id: fc1aa72f3308d25496c24f5ba6e9eae3.access" \
+  -H "CF-Access-Client-Secret: 0626ec1116c10885e4e88300885619cd9c0fd74b167b4ebc90767da201da6895" \
+  -H "Content-Type: application/json" \
+  -d "$(jq -nc --arg v "X.Y.Z" --arg p "macos" --arg k "releases/vX.Y.Z/jump-worker-dashboard-macos.zip" \
+              --arg f "jump-worker-dashboard-macos.zip" --argjson s $SIZE --arg h "$SHA" --arg n "$NOTES" \
+              '{version:$v, platform:$p, r2_key:$k, filename:$f, size:$s, sha256:$h, notes:$n}')" \
   https://api.guardian01.online/v1/admin/releases
 ```
 
-테스트 후 `POST /v1/admin/releases/{id}/unpublish`로 정리.
+### 테스트 루프
+
+- **구버전 앱 보관**: 빌드 후 `cp -R dist/jump-worker-dashboard.app dist_vA.B.C` 백업. **단순 `cp -R` 대신 반드시 `ditto`** (확장 속성/심볼릭 링크 보존).
+  ```bash
+  ditto dist/jump-worker-dashboard.app dist_vA.B.C
+  ```
+- **복원도 `ditto`**:
+  ```bash
+  rm -rf dist/jump-worker-dashboard.app
+  ditto dist_vA.B.C dist/jump-worker-dashboard.app
+  xattr -cr dist/jump-worker-dashboard.app
+  ```
+
+## 긴급 롤백
+
+```bash
+# D1에서 unpublish
+curl -X POST -H "CF-Access-Client-Id: ..." -H "CF-Access-Client-Secret: ..." \
+  https://api.guardian01.online/v1/admin/releases/{ID}/unpublish
+
+# 태그 삭제 (GitHub)
+git tag -d vX.Y.Z
+git push origin :refs/tags/vX.Y.Z
+gh release delete vX.Y.Z -R CatIsApple/jump-platform --yes
+
+# R2 객체 삭제 (선택)
+npx wrangler r2 object delete jump-platform-releases/releases/vX.Y.Z/GUARDIAN_Jump_Setup.exe --remote
+```
+
+## 빌드 파이프라인 주의사항
+
+**PyInstaller 필수 옵션** (이미 `scripts/build_*`에 포함):
+- `--collect-data=certifi` — SSL 인증서 번들 (필수! 없으면 HTTPS 실패)
+- `--copy-metadata=certifi,requests,urllib3` — 메타데이터 누락 방지
+- `--collect-submodules=selenium` — selenium 서브모듈
+- `--collect-submodules=jump_site_modules` — 사이트 모듈
+
+**Nuitka 옵션** (`build-release-nuitka.yml`):
+- `--msvc=latest` (MinGW 대신)
+- `--nofollow-import-to=trio,trio_websocket` — 컴파일 크래시 방지
+- `--enable-plugin=tk-inter` — CustomTkinter
+
+## 시크릿 값
+
+> **⚠️ `.claude/secrets.local.md`에 모든 민감정보 (gitignore).**
+> skill 실행 전 이 파일 먼저 읽기.
+
+## 자주 하는 실수
+
+1. **버전 불일치**: `__init__.py`와 `pyproject.toml` 둘 다 업데이트
+2. **태그 누락**: `git push origin main`만 하면 Nuitka 빌드 안 됨, `git tag` + `git push origin TAG` 필수
+3. **macOS .app 복사/복원 시 `cp -R` 사용**: 확장 속성 손실로 Mach-O 바이너리 손상. 반드시 `ditto` 사용.
+4. **zip 해제 시 Python `zipfile`**: 심볼릭 링크 미지원. `ditto -x -k` 또는 `unzip` 사용 (이미 `updater.py`가 처리).
+5. **커밋 메시지 = 유저에게 보이는 notes**: 기술 용어 아닌 유저 친화적으로 작성

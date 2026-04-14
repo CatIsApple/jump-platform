@@ -32,6 +32,39 @@ class ObamSite(GnuboardSite):
     LOGIN_PRE_SUBMIT_DELAY = 0.5
     LOGIN_POST_SUBMIT_DELAY = 2.0
 
+    # ── 팝업 처리 ──
+
+    def _dismiss_popups(self) -> None:
+        """오밤 메인 페이지의 hd_pop 팝업 제거 (로그인 버튼 가림 방지)."""
+        try:
+            self.driver.execute_script(
+                """
+                document.querySelectorAll('#hd_pop, .hd_pops, [id^="hd_pops_"]').forEach(function(el) {
+                    try { el.remove(); } catch (_e) {}
+                });
+                // hd_pop 자체도 제거
+                var root = document.getElementById('hd_pop');
+                if (root) root.remove();
+                """
+            )
+            self.emit("[오밤] 팝업 제거 완료", "DEBUG")
+        except Exception as exc:
+            self.emit(f"[오밤] 팝업 제거 중 오류 (무시): {exc}", "DEBUG")
+
+    # ── Login hooks ──
+
+    def _navigate_to_login(self) -> None:
+        """로그인 페이지(=메인) 이동 + 팝업 닫기."""
+        super()._navigate_to_login()
+        # 페이지 로드 직후 팝업이 동적으로 표시되므로 잠깐 대기
+        time.sleep(0.8)
+        self._dismiss_popups()
+
+    def _fill_login_form(self) -> None:
+        """폼 채우기 전에도 팝업 한 번 더 닫기 (혹시 다시 떴을 경우)."""
+        self._dismiss_popups()
+        super()._fill_login_form()
+
     # ── Jump ──
 
     def jump(self) -> JumpResult:
@@ -40,6 +73,8 @@ class ObamSite(GnuboardSite):
             self.driver.get(f"{self.base_url}/")
             time.sleep(1.5)
             self.require_human_check()
+            # 점프 링크가 팝업에 가려질 가능성도 차단
+            self._dismiss_popups()
         except Exception as exc:
             return JumpResult(
                 status=STATUS_FAILED,

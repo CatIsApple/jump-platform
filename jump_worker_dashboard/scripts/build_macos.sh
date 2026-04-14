@@ -48,6 +48,10 @@ pyinstaller \
   --hidden-import=jump_site_modules.types \
   --collect-submodules=jump_site_modules \
   --collect-submodules=selenium \
+  --collect-data=certifi \
+  --copy-metadata=certifi \
+  --copy-metadata=requests \
+  --copy-metadata=urllib3 \
   --hidden-import=selenium.webdriver.chrome.webdriver \
   --hidden-import=selenium.webdriver.chrome.service \
   --hidden-import=selenium.webdriver.chrome.options \
