@@ -195,6 +195,47 @@ def execute_workflow(
 
     # ── 점프 실행 ──
     try:
+        # 알밤: 여러 게시물 URL을 순차 점프
+        if site_key == "알밤" and hasattr(site, "jump_posts"):
+            post_urls = list(workflow.post_urls or [])
+            if not post_urls:
+                return "failed", "알밤: 게시물 URL이 등록되지 않았습니다. 작업 설정에서 URL을 추가하세요."
+
+            results = site.jump_posts(post_urls)
+            total = len(post_urls)
+            success_cnt = sum(1 for _, r in results if r.status == "success")
+            cooldown_cnt = sum(1 for _, r in results if r.status == "cooldown")
+            fail_cnt = sum(1 for _, r in results if r.status in ("failed", "login_required"))
+
+            emit(
+                f"[알밤] 완료: {success_cnt}/{total} 성공, "
+                f"{cooldown_cnt} 초과, {fail_cnt} 실패",
+                "INFO",
+            )
+
+            # 대표 상태 결정: 하나라도 성공이면 성공 간주, 아니면 마지막 결과
+            if success_cnt > 0:
+                status = "success"
+                msg = f"{success_cnt}/{total}개 게시물 점프 완료"
+            elif cooldown_cnt > 0:
+                status = "cooldown"
+                msg = f"오늘 점프 횟수 초과 ({cooldown_cnt}/{total})"
+            elif results:
+                last = results[-1][1]
+                status = last.status or "unknown"
+                msg = last.message or "결과 확인 불가"
+            else:
+                status = "failed"
+                msg = "점프 결과 없음"
+
+            if status == "success":
+                emit(f"[성공] {site_key} - {uid}: {started_at} {msg}", "INFO")
+            elif status == "cooldown":
+                emit(f"[대기] {site_key} - {uid}: {started_at} {msg}", "INFO")
+            else:
+                emit(f"[실패] {site_key} - {uid}: {started_at} {msg}", "ERROR")
+            return status, msg
+
         jump_result = site.jump()
         status = jump_result.status or "unknown"
         msg = jump_result.message or "결과 확인 불가"

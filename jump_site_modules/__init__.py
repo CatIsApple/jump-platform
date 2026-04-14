@@ -27,6 +27,7 @@ from .gnuboard.opmania import OpmaniaSite
 from .gnuboard.opnara import OpnaraSite
 from .gnuboard.opart import OpartSite
 from .gnuboard.opview import OpviewSite
+from .xe.albam import AlbamSite
 from .xe.sexbam import SexbamSite
 
 SITE_REGISTRY: dict[str, type[BaseSite]] = {
@@ -45,6 +46,7 @@ SITE_REGISTRY: dict[str, type[BaseSite]] = {
     "오피마트": OpmartSite,
     "섹밤": SexbamSite,
     "인천달리기": IndalSite,
+    "알밤": AlbamSite,
 }
 
 

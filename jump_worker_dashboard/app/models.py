@@ -16,6 +16,7 @@ class Workflow:
     enabled: bool = True
     use_browser: bool = True
     schedules: list[str] = field(default_factory=list)
+    post_urls: list[str] = field(default_factory=list)  # 알밤 등 멀티 포스트용
 
 
 @dataclass

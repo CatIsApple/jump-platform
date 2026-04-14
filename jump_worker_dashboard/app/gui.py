@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import platform
+import re
 import sys
 import threading
 from collections import deque
@@ -681,6 +682,7 @@ class WorkerDashboardApp(ctk.CTk):
         self.selected_workflow_id: Optional[int] = None
         self._workflows_cache: list[Workflow] = []
         self._schedule_tokens: list[str] = []
+        self._post_urls: list[str] = []
         self._log_lines = deque(maxlen=3500)
         self._tick_count = 0
         self._toast_widget: Optional[Toast] = None
@@ -1901,6 +1903,61 @@ class WorkerDashboardApp(ctk.CTk):
         self.schedule_chips.grid_columnconfigure(0, weight=1)
         row += 1
 
+        # -- 게시물 URL (알밤 전용) --
+        self._albam_section_divider = self._section_divider(content)
+        self._albam_section_divider.grid(row=row, column=0, columnspan=2, sticky="ew", pady=SP["md"])
+        row += 1
+        self._albam_section_title = self._section_title(content, "게시물 URL (알밤)")
+        self._albam_section_title.grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, SP["md"]))
+        row += 1
+
+        post_url_card = ctk.CTkFrame(
+            content, fg_color=COLORS["input"],
+            corner_radius=STYLES["input_radius"],
+            border_width=1, border_color=COLORS["border"],
+        )
+        post_url_card.grid(row=row, column=0, columnspan=2, sticky="ew", pady=field_pady)
+        row += 1
+
+        post_url_row = ctk.CTkFrame(post_url_card, fg_color="transparent")
+        post_url_row.pack(fill="x", padx=SP["lg"], pady=SP["md"])
+
+        self.entry_post_url = ctk.CTkEntry(
+            post_url_row,
+            placeholder_text="예: https://albam9.com/index.php?document_srl=109488608",
+            height=32,
+            corner_radius=6,
+            fg_color=COLORS["card"],
+            border_color=COLORS["border"],
+            border_width=1,
+            text_color=COLORS["text"],
+            font=_font(13),
+        )
+        self.entry_post_url.pack(side="left", fill="x", expand=True)
+        self.entry_post_url.bind("<Return>", lambda _e: self._add_post_url())
+
+        ctk.CTkButton(
+            post_url_row, text="+ 추가",
+            width=64, height=32,
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            corner_radius=6, font=_font(14),
+            command=self._add_post_url,
+        ).pack(side="right", padx=(SP["sm"], 0))
+
+        self.post_url_chips = ctk.CTkFrame(content, fg_color="transparent")
+        self.post_url_chips.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, SP["sm"]))
+        self.post_url_chips.grid_columnconfigure(0, weight=1)
+        row += 1
+
+        # 섹션 위젯을 리스트로 보관 — 사이트별 표시/숨김용
+        self._albam_section_widgets = [
+            self._albam_section_divider,
+            self._albam_section_title,
+            post_url_card,
+            self.post_url_chips,
+        ]
+        self._render_post_url_chips()
+
         # -- 옵션 --
         self._section_divider(content).grid(row=row, column=0, columnspan=2, sticky="ew", pady=SP["md"])
         row += 1
@@ -2017,6 +2074,118 @@ class WorkerDashboardApp(ctk.CTk):
     def _on_site_selected(self, _value: str | None = None) -> None:
         self._sync_browser_option()
         self._sync_domain_from_platform()
+        self._update_albam_section_visibility()
+
+    def _update_albam_section_visibility(self) -> None:
+        """선택된 사이트가 알밤일 때만 게시물 URL 섹션을 표시한다."""
+        try:
+            site = (self.var_site.get() or "").strip()
+        except Exception:
+            return
+        widgets = getattr(self, "_albam_section_widgets", None)
+        if not widgets:
+            return
+        if site == "알밤":
+            for w in widgets:
+                try:
+                    w.grid()
+                except Exception:
+                    pass
+        else:
+            for w in widgets:
+                try:
+                    w.grid_remove()
+                except Exception:
+                    pass
+
+    def _add_post_url(self) -> None:
+        """게시물 URL 입력창에서 URL을 추가한다."""
+        try:
+            raw = self.entry_post_url.get().strip()
+        except Exception:
+            return
+        if not raw:
+            self.toast("게시물 URL을 입력해주세요.", "warning")
+            return
+
+        # 간단한 URL 검증
+        if not re.match(r"^https?://", raw):
+            self.toast("올바른 URL 형식이 아닙니다. (http:// 또는 https:// 필요)", "warning")
+            return
+
+        if raw in self._post_urls:
+            self.toast("이미 추가된 URL입니다.", "info")
+            return
+
+        self._post_urls.append(raw)
+        self._render_post_url_chips()
+        try:
+            self.entry_post_url.delete(0, "end")
+        except Exception:
+            pass
+
+    def _remove_post_url(self, url: str) -> None:
+        self._post_urls = [u for u in self._post_urls if u != url]
+        self._render_post_url_chips()
+
+    def _clear_post_urls(self) -> None:
+        self._post_urls = []
+        self._render_post_url_chips()
+
+    def _render_post_url_chips(self) -> None:
+        """등록된 게시물 URL을 칩 형태로 렌더링한다."""
+        chips = getattr(self, "post_url_chips", None)
+        if chips is None:
+            return
+        for child in chips.winfo_children():
+            child.destroy()
+
+        if not self._post_urls:
+            ctk.CTkLabel(
+                chips,
+                text="등록된 게시물이 없습니다. (알밤 전용)",
+                font=_font(13),
+                text_color=COLORS["text_4"],
+            ).pack(anchor="w", pady=(SP["xs"], 0))
+            return
+
+        for idx, url in enumerate(self._post_urls, 1):
+            # document_srl 추출해서 표시 (없으면 URL 축약)
+            m = re.search(r"document_srl[=/](\d+)", url)
+            label_text = (
+                f"{idx}. #{m.group(1)}" if m else f"{idx}. {url[:48]}{'…' if len(url) > 48 else ''}"
+            )
+
+            chip = ctk.CTkFrame(
+                chips, fg_color=COLORS["card"],
+                corner_radius=6, border_width=1,
+                border_color=COLORS["border"],
+            )
+            chip.pack(fill="x", pady=(0, SP["xs"]))
+
+            ctk.CTkLabel(
+                chip, text=label_text,
+                font=_font(13), text_color=COLORS["text_2"],
+                anchor="w",
+            ).pack(side="left", padx=SP["sm"], pady=4)
+
+            ctk.CTkButton(
+                chip, text="✕", width=24, height=24,
+                fg_color="transparent", hover_color=COLORS["card_hover"],
+                corner_radius=4, font=_font(11),
+                text_color=COLORS["text_4"],
+                command=lambda u=url: self._remove_post_url(u),
+            ).pack(side="right", padx=(0, 4), pady=4)
+
+        if len(self._post_urls) > 1:
+            ctk.CTkButton(
+                chips, text="모두 삭제",
+                height=26,
+                fg_color="transparent", hover_color=COLORS["card_hover"],
+                corner_radius=4, font=_font(12),
+                text_color=COLORS["text_4"],
+                command=self._clear_post_urls,
+            ).pack(anchor="e", pady=(SP["xs"], 0))
 
     def _sync_domain_from_platform(self, fallback: str | None = None) -> None:
         """플랫폼 선택값으로 도메인을 자동 설정한다.
@@ -2237,7 +2406,11 @@ class WorkerDashboardApp(ctk.CTk):
         self._schedule_tokens = list(wf.schedules)
         self._render_schedule_chips()
 
+        self._post_urls = list(wf.post_urls or [])
+        self._render_post_url_chips()
+
         self._sync_browser_option()
+        self._update_albam_section_visibility()
         self._reload_workflow_list()
 
     def _new_workflow(self) -> None:
@@ -2255,7 +2428,11 @@ class WorkerDashboardApp(ctk.CTk):
         self._schedule_tokens = []
         self._render_schedule_chips()
 
+        self._post_urls = []
+        self._render_post_url_chips()
+
         self._sync_browser_option()
+        self._update_albam_section_visibility()
         self._reload_workflow_list()
 
     def _clamp_time_input(self, var: ctk.StringVar, lo: int, hi: int) -> None:
@@ -2422,6 +2599,14 @@ class WorkerDashboardApp(ctk.CTk):
             self.toast("도메인은 필수입니다.", "warning")
             return
 
+        # 알밤은 게시물 URL이 최소 1개 필요
+        post_urls_for_save: list[str] = []
+        if site_key == "알밤":
+            if not self._post_urls:
+                self.toast("알밤은 게시물 URL을 하나 이상 등록해야 합니다.", "warning")
+                return
+            post_urls_for_save = list(self._post_urls)
+
         wf = Workflow(
             id=self.selected_workflow_id,
             name=name,
@@ -2433,6 +2618,7 @@ class WorkerDashboardApp(ctk.CTk):
             enabled=bool(self.var_enabled.get()),
             use_browser=bool(self.var_use_browser.get()),
             schedules=list(self._schedule_tokens),
+            post_urls=post_urls_for_save,
         )
 
         workflow_id = self.db.save_workflow(wf)

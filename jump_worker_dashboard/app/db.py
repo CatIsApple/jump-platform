@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from datetime import datetime
@@ -56,6 +57,7 @@ class Database:
             password TEXT NOT NULL DEFAULT '',
             enabled INTEGER NOT NULL DEFAULT 1,
             use_browser INTEGER NOT NULL DEFAULT 1,
+            post_urls TEXT NOT NULL DEFAULT '[]',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -88,17 +90,33 @@ class Database:
         """
         with self._lock:
             self._conn.executescript(sql)
+            # 기존 DB 마이그레이션: post_urls 컬럼 추가
+            try:
+                self._conn.execute(
+                    "ALTER TABLE workflows ADD COLUMN post_urls TEXT NOT NULL DEFAULT '[]'"
+                )
+            except sqlite3.OperationalError:
+                pass  # 이미 존재
             self._conn.commit()
 
     def _now(self) -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _parse_post_urls(self, raw: str | None) -> list[str]:
+        if not raw:
+            return []
+        try:
+            val = json.loads(raw)
+            return [str(u) for u in val] if isinstance(val, list) else []
+        except (json.JSONDecodeError, TypeError):
+            return []
 
     def list_workflows(self) -> list[Workflow]:
         with self._lock:
             cur = self._conn.execute(
                 """
                 SELECT id, name, site_key, domain, shop_name, username, password,
-                       enabled, use_browser
+                       enabled, use_browser, post_urls
                 FROM workflows
                 ORDER BY id DESC
                 """
@@ -120,6 +138,7 @@ class Database:
                         enabled=bool(row["enabled"]),
                         use_browser=bool(row["use_browser"]),
                         schedules=schedules,
+                        post_urls=self._parse_post_urls(row["post_urls"]),
                     )
                 )
             return workflows
@@ -129,7 +148,7 @@ class Database:
             row = self._conn.execute(
                 """
                 SELECT id, name, site_key, domain, shop_name, username, password,
-                       enabled, use_browser
+                       enabled, use_browser, post_urls
                 FROM workflows
                 WHERE id = ?
                 """,
@@ -149,18 +168,20 @@ class Database:
                 enabled=bool(row["enabled"]),
                 use_browser=bool(row["use_browser"]),
                 schedules=self.list_schedules(row["id"]),
+                post_urls=self._parse_post_urls(row["post_urls"]),
             )
 
     def save_workflow(self, workflow: Workflow) -> int:
         now = self._now()
+        post_urls_json = json.dumps(list(workflow.post_urls or []))
         with self._lock:
             if workflow.id is None:
                 cur = self._conn.execute(
                     """
                     INSERT INTO workflows
                         (name, site_key, domain, shop_name, username, password,
-                         enabled, use_browser, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         enabled, use_browser, post_urls, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         workflow.name.strip(),
@@ -171,6 +192,7 @@ class Database:
                         workflow.password,
                         int(workflow.enabled),
                         int(workflow.use_browser),
+                        post_urls_json,
                         now,
                         now,
                     ),
@@ -188,6 +210,7 @@ class Database:
                         password = ?,
                         enabled = ?,
                         use_browser = ?,
+                        post_urls = ?,
                         updated_at = ?
                     WHERE id = ?
                     """,
@@ -200,6 +223,7 @@ class Database:
                         workflow.password,
                         int(workflow.enabled),
                         int(workflow.use_browser),
+                        post_urls_json,
                         now,
                         workflow.id,
                     ),
