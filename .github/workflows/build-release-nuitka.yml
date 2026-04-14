@@ -1,0 +1,247 @@
+name: Build Release (Nuitka + Inno Setup)
+
+# 태그 푸시 시에만 트리거 — 공식 릴리즈용.
+# Windows: Nuitka (C 컴파일 — 강력한 역공학 방어) + Inno Setup 인스톨러
+# macOS:   PyInstaller (Nuitka macOS 지원 미흡 — 기존 안정 빌드 유지)
+# 소요시간: Windows ~30분, macOS ~5분
+#
+# 경로 가정 (monorepo 레이아웃):
+#   /                           = repo 루트 (작업 디렉토리)
+#   /jump_site_modules/         = 사이트 모듈 패키지
+#   /jump_worker_dashboard/     = 클라이언트 앱 패키지
+#   /jump_worker_dashboard/main.py
+#   /jump_worker_dashboard/app/
+#   /jump_worker_dashboard/assets/calendar.ico
+#   /jump_worker_dashboard/installer/guardian-setup.iss
+#
+# Inno Setup 스크립트(.iss)는 ..\dist\jump-worker-dashboard\* 를 참조하므로
+# Nuitka 빌드 결과물을 해당 경로에 배치한 후 ISCC 호출.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  #  macOS (PyInstaller — 안정적)
+  # ─────────────────────────────────────────────────────────────
+  build-macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Copy jump_site_modules into build context
+        run: cp -r jump_site_modules jump_worker_dashboard/jump_site_modules
+
+      - name: Build macOS package
+        run: |
+          cd jump_worker_dashboard
+          chmod +x scripts/build_macos.sh
+          ./scripts/build_macos.sh
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jump-worker-dashboard-macos
+          path: jump_worker_dashboard/dist/jump-worker-dashboard-macos.zip
+
+  # ─────────────────────────────────────────────────────────────
+  #  Windows (Nuitka) — standalone 리포에서 검증된 설정 이식
+  # ─────────────────────────────────────────────────────────────
+  build-windows-nuitka:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      # Nuitka 다운로드 캐시 (MSVC 관련 depends 등)
+      - name: Cache Nuitka downloads
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\Nuitka\Nuitka\Cache\downloads
+          key: nuitka-downloads-windows-v3
+
+      - name: Install dependencies
+        shell: cmd
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ^
+            "nuitka>=2.0" ^
+            "ordered-set>=4.1" ^
+            "zstandard" ^
+            "customtkinter>=5.2.0" ^
+            "requests>=2.31.0" ^
+            "selenium>=4.20.0" ^
+            "beautifulsoup4>=4.12.0" ^
+            "brotli>=1.1.0" ^
+            "2captcha-python>=1.2.0" ^
+            "Pillow>=10.0.0"
+
+      # obfuscate_strings.py 가 있으면 실행, 없으면 스킵
+      - name: Obfuscate strings (optional)
+        shell: pwsh
+        run: |
+          $script = "jump_worker_dashboard/scripts/obfuscate_strings.py"
+          if (Test-Path $script) {
+            Write-Host "Running string obfuscation..."
+            python $script jump_worker_dashboard jump_site_modules
+          } else {
+            Write-Host "obfuscate_strings.py not found — skipping (Nuitka alone provides strong protection)"
+          }
+
+      # Nuitka 빌드 — 반드시 repo 루트에서 실행해야 jump_worker_dashboard.app 임포트 가능
+      - name: Build with Nuitka (onefile)
+        shell: cmd
+        run: |
+          python -m nuitka ^
+            --onefile ^
+            --msvc=latest ^
+            --jobs=4 ^
+            --windows-console-mode=disable ^
+            --windows-icon-from-ico=jump_worker_dashboard/assets/calendar.ico ^
+            --enable-plugin=tk-inter ^
+            --include-package=jump_site_modules ^
+            --include-package=jump_worker_dashboard.app ^
+            --include-package=jump_worker_dashboard.app.site_handlers ^
+            --include-package=selenium ^
+            --include-package=requests ^
+            --include-package=urllib3 ^
+            --include-package=bs4 ^
+            --include-package=twocaptcha ^
+            --nofollow-import-to=selenium.webdriver.firefox ^
+            --nofollow-import-to=selenium.webdriver.edge ^
+            --nofollow-import-to=selenium.webdriver.safari ^
+            --nofollow-import-to=selenium.webdriver.ie ^
+            --nofollow-import-to=selenium.webdriver.webkitgtk ^
+            --nofollow-import-to=selenium.webdriver.wpewebkit ^
+            --nofollow-import-to=trio ^
+            --nofollow-import-to=trio_websocket ^
+            --include-package-data=customtkinter ^
+            --include-package-data=selenium ^
+            --include-package-data=certifi ^
+            --include-data-dir=jump_worker_dashboard/assets=assets ^
+            --output-dir=build_nuitka ^
+            --output-filename=jump-worker-dashboard.exe ^
+            --remove-output ^
+            --assume-yes-for-downloads ^
+            jump_worker_dashboard/main.py
+
+      - name: Verify Nuitka build output
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Recurse -Filter "jump-worker-dashboard.exe" -Path "build_nuitka" |
+                  Select-Object -First 1 -ExpandProperty FullName
+          if (!$exe) {
+            Write-Error "Build failed: exe not found"
+            Get-ChildItem -Recurse build_nuitka | Format-Table FullName, Length
+            exit 1
+          }
+          $sizeMB = [math]::Round((Get-Item $exe).Length / 1MB, 1)
+          Write-Host "Nuitka build OK: $exe ($sizeMB MB)"
+          echo "NUITKA_EXE=$exe" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      # Smoke test: EXE 실행 후 5초 내 크래시 여부 확인
+      - name: Smoke test (5s launch check)
+        shell: pwsh
+        run: |
+          $exe = $env:NUITKA_EXE
+          Write-Host "Smoke test: $exe"
+          $proc = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 5
+          if ($proc.HasExited) {
+            Write-Error "FAIL: Process exited with code $($proc.ExitCode) within 5s"
+            exit 1
+          }
+          Write-Host "PASS: Process still running (PID $($proc.Id))"
+          Stop-Process -Id $proc.Id -Force
+
+      # Inno Setup이 참조하는 경로에 Nuitka 결과물 배치
+      # .iss 의 Source: "..\dist\jump-worker-dashboard\*" → jump_worker_dashboard/dist/jump-worker-dashboard/
+      - name: Stage files for Inno Setup
+        shell: pwsh
+        run: |
+          $stage = "jump_worker_dashboard\dist\jump-worker-dashboard"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item $env:NUITKA_EXE "$stage\jump-worker-dashboard.exe"
+          Copy-Item -Recurse jump_worker_dashboard\assets "$stage\assets"
+          Write-Host "Staged files:"
+          Get-ChildItem -Recurse $stage | Format-Table FullName, Length
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Build Inno Setup installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $iscc jump_worker_dashboard\installer\guardian-setup.iss /O"jump_worker_dashboard\dist" /Q
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Inno Setup compilation failed (exit $LASTEXITCODE)"
+            exit 1
+          }
+          $setup = "jump_worker_dashboard\dist\GUARDIAN_Jump_Setup.exe"
+          if (!(Test-Path $setup)) {
+            Write-Error "Installer not found at $setup"
+            Get-ChildItem jump_worker_dashboard\dist | Format-Table Name, Length
+            exit 1
+          }
+          $sizeMB = [math]::Round((Get-Item $setup).Length / 1MB, 1)
+          Write-Host "Inno Setup installer: $setup ($sizeMB MB)"
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jump-worker-dashboard-windows
+          path: jump_worker_dashboard/dist/GUARDIAN_Jump_Setup.exe
+
+  # ─────────────────────────────────────────────────────────────
+  #  Release 생성 + GitHub Release 업로드
+  # ─────────────────────────────────────────────────────────────
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-macos, build-windows-nuitka]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: jump-worker-dashboard-macos
+          path: release
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: jump-worker-dashboard-windows
+          path: release
+
+      - name: Create checksums
+        run: |
+          cd release
+          sha256sum * > SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*
+          generate_release_notes: true
