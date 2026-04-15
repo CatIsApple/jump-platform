@@ -130,6 +130,21 @@ async function handleAuthLogin(req: Request, env: Env): Promise<Response> {
   const tokenHash = await sha256Hex(`${pepper}:${token}`);
   const prefix = tokenPrefix(token);
 
+  // 동일 (license, device) 조합의 기존 활성 세션은 자동 폐기 — 중복 누적 방지.
+  // 클라이언트가 크래시/강제종료/재설치로 logout을 호출하지 못한 경우에도 깔끔히 정리됨.
+  if (deviceId) {
+    await env.DB
+      .prepare(
+        `UPDATE sessions
+           SET revoked_at = ?
+         WHERE license_id = ?
+           AND device_id = ?
+           AND revoked_at IS NULL`
+      )
+      .bind(now, lic.id, deviceId)
+      .run();
+  }
+
   await env.DB
     .prepare(
       `
@@ -194,6 +209,15 @@ async function handleAuthHeartbeat(req: Request, env: Env): Promise<Response> {
   }
 }
 
+// heartbeat이 이 시간(초) 이상 끊기면 UI에 "stale" 로 표시.
+// 3분(heartbeat 6회 누락)이면 사실상 연결 끊김. 표시용일 뿐 자동 revoke 아님.
+const SESSION_STALE_AFTER_SECONDS = 180;
+
+// /v1/admin/sessions/cleanup-stale 의 기본 임계값.
+// 노트북 슬립·Wi-Fi 전환 같은 일시적 단절로 정상 사용자가 쓸려가지 않도록
+// 30분으로 설정. 관리자가 ?min_age_seconds=XXX 로 더 짧게 지정 가능.
+const SESSION_CLEANUP_DEFAULT_SECONDS = 1800;
+
 async function handleAdminLicenseSessions(req: Request, env: Env, licenseId: number): Promise<Response> {
   try {
     await requireAdmin(req, env);
@@ -203,15 +227,19 @@ async function handleAdminLicenseSessions(req: Request, env: Env, licenseId: num
 
   if (req.method !== "GET") return methodNotAllowed();
 
+  const url = new URL(req.url);
+  const onlyActive = url.searchParams.get("status") === "active";
+  const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 50, 1), 200);
+
   const rows = await env.DB
     .prepare(
       `SELECT id, token_prefix, created_at, last_seen_at, revoked_at, device_id
        FROM sessions
        WHERE license_id = ?
        ORDER BY id DESC
-       LIMIT 50`
+       LIMIT ?`
     )
-    .bind(licenseId)
+    .bind(licenseId, limit)
     .all<{
       id: number;
       token_prefix: string;
@@ -221,7 +249,67 @@ async function handleAdminLicenseSessions(req: Request, env: Env, licenseId: num
       device_id: string;
     }>();
 
-  return json({ ok: true, sessions: rows.results || [] });
+  const now = nowUnixSeconds();
+  const staleThreshold = now - SESSION_STALE_AFTER_SECONDS;
+
+  const sessions = (rows.results || []).map((r) => {
+    let status: "active" | "stale" | "revoked";
+    if (r.revoked_at != null) {
+      status = "revoked";
+    } else if (Number(r.last_seen_at) < staleThreshold) {
+      status = "stale";
+    } else {
+      status = "active";
+    }
+    return { ...r, status };
+  });
+
+  const filtered = onlyActive ? sessions.filter((s) => s.status === "active") : sessions;
+
+  return json({
+    ok: true,
+    sessions: filtered,
+    server_time: now,
+    stale_after_seconds: SESSION_STALE_AFTER_SECONDS,
+  });
+}
+
+// 오래된 stale 세션 일괄 정리 — 관리자용.
+// 기본: heartbeat이 SESSION_STALE_AFTER_SECONDS 초 이상 없는 미폐기 세션을 모두 revoke.
+// ?min_age_seconds=xxx 로 임계값 조정 가능.
+async function handleAdminSessionsCleanup(req: Request, env: Env): Promise<Response> {
+  try {
+    await requireAdmin(req, env);
+  } catch {
+    return unauthorized("관리자 인증이 필요합니다.");
+  }
+
+  if (req.method !== "POST") return methodNotAllowed();
+
+  const url = new URL(req.url);
+  const parsed = Number(url.searchParams.get("min_age_seconds"));
+  const minAge = Number.isFinite(parsed) && parsed > 0 ? parsed : SESSION_CLEANUP_DEFAULT_SECONDS;
+
+  const now = nowUnixSeconds();
+  const cutoff = now - minAge;
+
+  const result = await env.DB
+    .prepare(
+      `UPDATE sessions
+         SET revoked_at = ?
+       WHERE revoked_at IS NULL
+         AND last_seen_at < ?`
+    )
+    .bind(now, cutoff)
+    .run();
+
+  const changed = result.meta?.changes || 0;
+  return json({
+    ok: true,
+    revoked_count: changed,
+    min_age_seconds: minAge,
+    cutoff_unix: cutoff,
+  });
 }
 
 async function handleAdminSessionRevoke(req: Request, env: Env, sessionId: number): Promise<Response> {
@@ -857,6 +945,8 @@ export default {
       const m = /^\/v1\/admin\/sessions\/(\d+)\/revoke$/.exec(path);
       if (m) return handleAdminSessionRevoke(req, env, Number(m[1]));
     }
+    // Admin: 오래된 stale 세션 일괄 정리
+    if (path === "/v1/admin/sessions/cleanup-stale") return handleAdminSessionsCleanup(req, env);
 
     // Admin: platform domains
     if (path === "/v1/admin/platform-domains") return handleAdminPlatformDomains(req, env);
