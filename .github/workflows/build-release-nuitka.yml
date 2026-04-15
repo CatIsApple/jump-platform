@@ -80,17 +80,6 @@ jobs:
           path: ~\AppData\Local\Nuitka\Nuitka\Cache\downloads
           key: nuitka-downloads-windows-v3
 
-      # Nuitka 컴파일 캐시 (ccache/msvc obj) — 소스 변화 적으면 재사용
-      - name: Cache Nuitka compile cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~\AppData\Local\Nuitka\Nuitka\Cache\ccache
-            ~\AppData\Local\Nuitka\Nuitka\Cache\clcache
-          key: nuitka-compile-windows-${{ hashFiles('jump_worker_dashboard/**/*.py', 'jump_site_modules/**/*.py') }}
-          restore-keys: |
-            nuitka-compile-windows-
-
       - name: Install dependencies
         shell: cmd
         run: |
@@ -120,14 +109,13 @@ jobs:
           }
 
       # Nuitka 빌드 — onefile 모드 (검증된 설정 유지)
-      # 속도 최적화: jobs=8 (4→8, 안전) + ccache 캐시 (위에서 actions/cache 준비)
       - name: Build with Nuitka (onefile)
         shell: cmd
         run: |
           python -m nuitka ^
             --onefile ^
             --msvc=latest ^
-            --jobs=8 ^
+            --jobs=4 ^
             --windows-console-mode=disable ^
             --windows-icon-from-ico=jump_worker_dashboard/assets/calendar.ico ^
             --enable-plugin=tk-inter ^
