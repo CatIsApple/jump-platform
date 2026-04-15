@@ -105,8 +105,33 @@ class JumpAdminApi:
         data = self._request("GET", f"/v1/admin/licenses/{int(license_id)}/sessions")
         return list((data or {}).get("sessions") or [])
 
+    def list_all_sessions(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 200,
+        offset: int = 0,
+        search: str = "",
+    ) -> dict[str, Any]:
+        """전체 라이센스의 세션 통합 조회 (통계 포함)."""
+        params: dict[str, str] = {"limit": str(int(limit)), "offset": str(int(offset))}
+        if status:
+            params["status"] = status
+        if search:
+            params["search"] = search
+        return self._request("GET", "/v1/admin/sessions", params=params) or {}
+
     def revoke_session(self, session_id: int) -> dict[str, Any]:
         return self._request("POST", f"/v1/admin/sessions/{int(session_id)}/revoke", json_body={})
+
+    def cleanup_stale_sessions(self, min_age_seconds: int = 1800) -> dict[str, Any]:
+        """heartbeat이 min_age_seconds 이상 없는 미폐기 세션을 일괄 revoke (기본 30분)."""
+        return self._request(
+            "POST",
+            "/v1/admin/sessions/cleanup-stale",
+            params={"min_age_seconds": str(int(min_age_seconds))},
+            json_body={},
+        )
 
     # ---- Platform domains ----
     def list_domains(self) -> list[dict[str, Any]]:

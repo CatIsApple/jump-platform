@@ -32,6 +32,26 @@ function parseBearer(req: Request): string | null {
   return m?.[1]?.trim() || null;
 }
 
+// Cloudflare 전용 헤더에서 클라이언트 IP/국가 추출.
+// CF-Connecting-IP는 스푸핑 불가(CF proxy 뒤에서만 설정됨).
+function clientIp(req: Request): string {
+  return (
+    req.headers.get("CF-Connecting-IP") ||
+    req.headers.get("cf-connecting-ip") ||
+    (req.headers.get("X-Forwarded-For") || "").split(",")[0]?.trim() ||
+    ""
+  );
+}
+
+function clientCountry(req: Request): string {
+  return (req.headers.get("CF-IPCountry") || req.headers.get("cf-ipcountry") || "").toUpperCase();
+}
+
+function clientUserAgent(req: Request): string {
+  // DB 행 크기 낭비 방지 + 노이즈 제거.
+  return (req.headers.get("User-Agent") || "").slice(0, 256);
+}
+
 async function requireAdmin(req: Request, env: Env): Promise<void> {
   // 1) Optional extra guard: X-Admin-Token
   const adminToken = (env.ADMIN_TOKEN || "").trim();
@@ -95,8 +115,14 @@ async function requireSession(req: Request, env: Env): Promise<{
   if (row.status !== "active") throw new Error("forbidden");
   if (Number(row.expires_at) <= now) throw new Error("expired");
 
-  // best-effort last_seen 갱신
-  env.DB.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?").bind(now, row.session_id).run().catch(() => {});
+  // best-effort last_seen + IP/country 갱신 (모바일 네트워크 전환 추적용)
+  const ip = clientIp(req);
+  const country = clientCountry(req);
+  env.DB
+    .prepare("UPDATE sessions SET last_seen_at = ?, ip_address = ?, ip_country = ? WHERE id = ?")
+    .bind(now, ip, country, row.session_id)
+    .run()
+    .catch(() => {});
 
   return row;
 }
@@ -145,14 +171,22 @@ async function handleAuthLogin(req: Request, env: Env): Promise<Response> {
       .run();
   }
 
+  const ip = clientIp(req);
+  const country = clientCountry(req);
+  const ua = clientUserAgent(req);
+
   await env.DB
     .prepare(
       `
-      INSERT INTO sessions(token_hash, token_prefix, license_id, created_at, last_seen_at, device_id)
-      VALUES(?, ?, ?, ?, ?, ?)
+      INSERT INTO sessions(
+        token_hash, token_prefix, license_id,
+        created_at, last_seen_at, device_id,
+        ip_address, user_agent, ip_country
+      )
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
       `
     )
-    .bind(tokenHash, prefix, lic.id, now, now, deviceId)
+    .bind(tokenHash, prefix, lic.id, now, now, deviceId, ip, ua, country)
     .run();
 
   return json({
@@ -233,7 +267,8 @@ async function handleAdminLicenseSessions(req: Request, env: Env, licenseId: num
 
   const rows = await env.DB
     .prepare(
-      `SELECT id, token_prefix, created_at, last_seen_at, revoked_at, device_id
+      `SELECT id, token_prefix, created_at, last_seen_at, revoked_at,
+              device_id, ip_address, user_agent, ip_country
        FROM sessions
        WHERE license_id = ?
        ORDER BY id DESC
@@ -247,6 +282,9 @@ async function handleAdminLicenseSessions(req: Request, env: Env, licenseId: num
       last_seen_at: number;
       revoked_at: number | null;
       device_id: string;
+      ip_address: string;
+      user_agent: string;
+      ip_country: string;
     }>();
 
   const now = nowUnixSeconds();
@@ -271,6 +309,105 @@ async function handleAdminLicenseSessions(req: Request, env: Env, licenseId: num
     sessions: filtered,
     server_time: now,
     stale_after_seconds: SESSION_STALE_AFTER_SECONDS,
+  });
+}
+
+// 전체 세션 조회 — 관리자 대시보드 "세션 관리" 탭용.
+// 모든 라이센스의 세션을 통합해서 반환 (company_name 조인 포함).
+//
+// 쿼리 파라미터:
+//   - status=active|stale|revoked (필터)
+//   - limit=100 (기본 100, 최대 500)
+//   - offset=0 (페이지네이션)
+//   - search=... (company_name / ip / device_id 부분 일치)
+async function handleAdminAllSessions(req: Request, env: Env): Promise<Response> {
+  try {
+    await requireAdmin(req, env);
+  } catch {
+    return unauthorized("관리자 인증이 필요합니다.");
+  }
+
+  if (req.method !== "GET") return methodNotAllowed();
+
+  const url = new URL(req.url);
+  const statusFilter = (url.searchParams.get("status") || "").toLowerCase();
+  const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 100, 1), 500);
+  const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0);
+  const search = (url.searchParams.get("search") || "").trim();
+
+  let sql = `
+    SELECT s.id, s.token_prefix, s.license_id,
+           s.created_at, s.last_seen_at, s.revoked_at,
+           s.device_id, s.ip_address, s.user_agent, s.ip_country,
+           l.company_name
+    FROM sessions s
+    JOIN licenses l ON l.id = s.license_id
+  `;
+  const binds: (string | number)[] = [];
+  const where: string[] = [];
+
+  if (search) {
+    where.push("(l.company_name LIKE ? OR s.device_id LIKE ? OR s.ip_address LIKE ?)");
+    const pat = `%${search}%`;
+    binds.push(pat, pat, pat);
+  }
+
+  if (where.length > 0) {
+    sql += " WHERE " + where.join(" AND ");
+  }
+
+  sql += " ORDER BY s.last_seen_at DESC LIMIT ? OFFSET ?";
+  binds.push(limit, offset);
+
+  const rows = await env.DB.prepare(sql).bind(...binds).all<{
+    id: number;
+    token_prefix: string;
+    license_id: number;
+    created_at: number;
+    last_seen_at: number;
+    revoked_at: number | null;
+    device_id: string;
+    ip_address: string;
+    user_agent: string;
+    ip_country: string;
+    company_name: string;
+  }>();
+
+  const now = nowUnixSeconds();
+  const staleThreshold = now - SESSION_STALE_AFTER_SECONDS;
+
+  let sessions = (rows.results || []).map((r) => {
+    let status: "active" | "stale" | "revoked";
+    if (r.revoked_at != null) status = "revoked";
+    else if (Number(r.last_seen_at) < staleThreshold) status = "stale";
+    else status = "active";
+    return { ...r, status };
+  });
+
+  if (statusFilter === "active" || statusFilter === "stale" || statusFilter === "revoked") {
+    sessions = sessions.filter((s) => s.status === statusFilter);
+  }
+
+  // 전체 통계
+  const stats = await env.DB
+    .prepare(
+      `SELECT
+         COUNT(*) AS total,
+         SUM(CASE WHEN revoked_at IS NULL AND last_seen_at >= ? THEN 1 ELSE 0 END) AS active,
+         SUM(CASE WHEN revoked_at IS NULL AND last_seen_at <  ? THEN 1 ELSE 0 END) AS stale,
+         SUM(CASE WHEN revoked_at IS NOT NULL THEN 1 ELSE 0 END) AS revoked
+       FROM sessions`
+    )
+    .bind(staleThreshold, staleThreshold)
+    .first<{ total: number; active: number; stale: number; revoked: number }>();
+
+  return json({
+    ok: true,
+    sessions,
+    server_time: now,
+    stale_after_seconds: SESSION_STALE_AFTER_SECONDS,
+    stats: stats || { total: 0, active: 0, stale: 0, revoked: 0 },
+    paging: { limit, offset },
   });
 }
 
@@ -940,6 +1077,8 @@ export default {
       const m = /^\/v1\/admin\/licenses\/(\d+)\/sessions$/.exec(path);
       if (m) return handleAdminLicenseSessions(req, env, Number(m[1]));
     }
+    // Admin: 전체 세션 조회 (통합 세션 관리 탭)
+    if (path === "/v1/admin/sessions") return handleAdminAllSessions(req, env);
     // Admin: revoke individual session
     {
       const m = /^\/v1\/admin\/sessions\/(\d+)\/revoke$/.exec(path);

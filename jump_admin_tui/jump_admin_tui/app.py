@@ -27,6 +27,34 @@ def _fmt_ts(unix_s: int | None) -> str:
         return str(unix_s)
 
 
+def _ua_summary(ua: str) -> str:
+    """User-Agent 문자열을 간략한 요약으로 변환."""
+    if not ua:
+        return "-"
+    s = ua.lower()
+    # OS 탐지
+    if "windows" in s:
+        os_name = "Win"
+    elif "mac os x" in s or "macintosh" in s:
+        os_name = "macOS"
+    elif "linux" in s:
+        os_name = "Linux"
+    else:
+        os_name = "?"
+    # 클라이언트 탐지 (jump-worker-dashboard는 python-requests 사용)
+    if "python-requests" in s or "python" in s:
+        client = "jump-client"
+    elif "chrome" in s:
+        client = "Chrome"
+    elif "firefox" in s:
+        client = "Firefox"
+    elif "safari" in s:
+        client = "Safari"
+    else:
+        client = ua[:20]
+    return f"{os_name}/{client}"
+
+
 class Toast(Static):
     def show(self, msg: str) -> None:
         self.update(msg)
@@ -136,12 +164,16 @@ class JumpAdminTui(App):
         Binding("r", "refresh", "새로고침", priority=True),
         Binding("1", "view_licenses", "라이센스", priority=True),
         Binding("2", "view_domains", "도메인", priority=True),
+        Binding("3", "view_sessions", "세션", priority=True),
         Binding("c", "open_config", "설정", priority=True),
         Binding("n", "license_new", "라이센스 생성", priority=True),
         Binding("e", "primary", "기본 동작", priority=True),
         Binding("s", "license_toggle", "정지/해제", priority=True),
         Binding("x", "license_revoke", "폐기", priority=True),
         Binding("d", "domain_delete", "도메인 삭제", priority=True),
+        Binding("k", "session_revoke", "세션 종료", priority=True),
+        Binding("u", "sessions_cleanup", "오래된 세션 정리", priority=True),
+        Binding("f", "sessions_filter", "세션 필터", priority=True),
         Binding("escape", "edit_cancel", "취소", show=False, priority=True),
         Binding("ctrl+s", "edit_submit", "저장", show=False, priority=True),
     ]
@@ -159,6 +191,10 @@ class JumpAdminTui(App):
 
         self._licenses: list[dict[str, Any]] = []
         self._domains: list[dict[str, Any]] = []
+        self._sessions: list[dict[str, Any]] = []
+        self._sessions_stats: dict[str, Any] = {}
+        # 세션 탭 필터 순환: all → active → stale → revoked → all
+        self._sessions_status_filter: str = "active"
 
     # -------------------------
     # UI
@@ -171,11 +207,15 @@ class JumpAdminTui(App):
                 yield Button("설정[c]", id="btn_config")
                 yield Button("라이센스[1]", id="btn_view_licenses")
                 yield Button("도메인[2]", id="btn_view_domains")
+                yield Button("세션[3]", id="btn_view_sessions")
                 yield Button("생성[n]", id="btn_license_new")
                 yield Button("기본[e]", id="btn_primary")
                 yield Button("정지/해제[s]", id="btn_license_toggle")
                 yield Button("폐기[x]", id="btn_license_revoke", variant="warning")
                 yield Button("삭제[d]", id="btn_domain_delete", variant="warning")
+                yield Button("세션종료[k]", id="btn_session_revoke", variant="warning")
+                yield Button("필터[f]", id="btn_sessions_filter")
+                yield Button("정리[u]", id="btn_sessions_cleanup", variant="warning")
 
             with Horizontal(id="split"):
                 with TabbedContent(id="tabs"):
@@ -183,6 +223,8 @@ class JumpAdminTui(App):
                         yield self._make_licenses_table()
                     with TabPane("플랫폼 도메인", id="tab_domains"):
                         yield self._make_domains_table()
+                    with TabPane("세션", id="tab_sessions"):
+                        yield self._make_sessions_table()
 
                 with Container(id="detail", classes="panel"):
                     yield Label("상세", id="detail_title")
@@ -215,6 +257,15 @@ class JumpAdminTui(App):
         table.cursor_type = "row"
         table.show_cursor = True
         table.add_columns("사이트", "도메인", "업데이트")
+        return table
+
+    def _make_sessions_table(self) -> DataTable:
+        table = DataTable(id="sessions", zebra_stripes=True)
+        table.cursor_type = "row"
+        table.show_cursor = True
+        table.add_columns(
+            "ID", "업체", "상태", "디바이스", "IP", "국가", "최근접속", "생성", "브라우저"
+        )
         return table
 
     @staticmethod
@@ -267,12 +318,16 @@ class JumpAdminTui(App):
             "r": "refresh",
             "1": "view_licenses",
             "2": "view_domains",
+            "3": "view_sessions",
             "c": "open_config",
             "n": "license_new",
             "e": "primary",
             "s": "license_toggle",
             "x": "license_revoke",
             "d": "domain_delete",
+            "k": "session_revoke",
+            "u": "sessions_cleanup",
+            "f": "sessions_filter",
         }
         action_name = mapping.get(key)
         if not action_name:
@@ -326,10 +381,14 @@ class JumpAdminTui(App):
             return
 
         self.toast.show("불러오는 중...")
+        status_param: str | None = self._sessions_status_filter if self._sessions_status_filter != "all" else None
         try:
-            licenses, domains = await asyncio.gather(
+            licenses, domains, sessions_data = await asyncio.gather(
                 asyncio.to_thread(self.api.list_licenses),
                 asyncio.to_thread(self.api.list_domains),
+                asyncio.to_thread(
+                    self.api.list_all_sessions, status=status_param, limit=200
+                ),
             )
         except ApiError as exc:
             self.toast.show(f"오류: {exc} ({exc.status_code})")
@@ -340,6 +399,8 @@ class JumpAdminTui(App):
 
         self._licenses = list(licenses or [])
         self._domains = list(domains or [])
+        self._sessions = list((sessions_data or {}).get("sessions") or [])
+        self._sessions_stats = dict((sessions_data or {}).get("stats") or {})
 
         lic_table = self.query_one("#licenses", DataTable)
         lic_table.clear()
@@ -367,11 +428,34 @@ class JumpAdminTui(App):
                 key=site_key,
             )
 
+        ses_table = self.query_one("#sessions", DataTable)
+        ses_table.clear()
+        for s in self._sessions:
+            sid = str(s.get("id", ""))
+            status = str(s.get("status", ""))
+            # 상태별 이모지 프리픽스로 시각적 구분
+            badge = {"active": "🟢", "stale": "🟡", "revoked": "⚫"}.get(status, "")
+            ua_short = _ua_summary(str(s.get("user_agent", "")))
+            ses_table.add_row(
+                sid,
+                str(s.get("company_name", ""))[:20],
+                f"{badge} {status}",
+                str(s.get("device_id", ""))[:24],
+                str(s.get("ip_address", "")) or "-",
+                str(s.get("ip_country", "")) or "-",
+                _fmt_ts(s.get("last_seen_at")),
+                _fmt_ts(s.get("created_at")),
+                ua_short,
+                key=sid,
+            )
+
         # ensure cursor
         if lic_table.row_count and (lic_table.cursor_row < 0 or lic_table.cursor_row >= lic_table.row_count):
             lic_table.move_cursor(row=0, column=0, animate=False, scroll=False)
         if dom_table.row_count and (dom_table.cursor_row < 0 or dom_table.cursor_row >= dom_table.row_count):
             dom_table.move_cursor(row=0, column=0, animate=False, scroll=False)
+        if ses_table.row_count and (ses_table.cursor_row < 0 or ses_table.cursor_row >= ses_table.row_count):
+            ses_table.move_cursor(row=0, column=0, animate=False, scroll=False)
 
         self._update_detail_from_focus()
         self.toast.show("완료")
@@ -379,6 +463,48 @@ class JumpAdminTui(App):
     def _update_detail_from_focus(self) -> None:
         detail = self.query_one("#detail_body", Static)
         tab = self._active_tab()
+        if tab == "tab_sessions":
+            stats = self._sessions_stats or {}
+            header = (
+                f"📊 전체 {stats.get('total', 0)}개  |  "
+                f"🟢 활성 {stats.get('active', 0)}  "
+                f"🟡 stale {stats.get('stale', 0)}  "
+                f"⚫ 폐기 {stats.get('revoked', 0)}\n"
+                f"필터: [{self._sessions_status_filter}]  "
+                f"(f=필터 변경)\n"
+            )
+            table = self.query_one("#sessions", DataTable)
+            if table.row_count <= 0 or table.cursor_row < 0:
+                detail.update(header + "\n조건에 맞는 세션이 없습니다.")
+                return
+            # 현재 커서의 세션 dict 찾기
+            try:
+                row_key = str(table.get_row_at(table.cursor_row)[0])
+                session = next((s for s in self._sessions if str(s.get("id")) == row_key), None)
+            except Exception:
+                session = None
+            if not session:
+                detail.update(header)
+                return
+            lines = [
+                header,
+                f"세션 ID: {session.get('id')}",
+                f"라이센스 ID: {session.get('license_id')}",
+                f"업체: {session.get('company_name', '')}",
+                f"상태: {session.get('status', '')}",
+                f"디바이스: {session.get('device_id', '') or '-'}",
+                f"IP: {session.get('ip_address') or '-'}  ({session.get('ip_country') or '?'})",
+                f"브라우저: {session.get('user_agent') or '-'}",
+                f"Token prefix: {session.get('token_prefix', '')}…",
+                f"생성: {_fmt_ts(session.get('created_at'))}",
+                f"최근 접속: {_fmt_ts(session.get('last_seen_at'))}",
+                f"폐기 시각: {_fmt_ts(session.get('revoked_at')) if session.get('revoked_at') else '-'}",
+                "",
+                "[키] k=세션 종료(2회), u=오래된 세션 정리(2회), f=필터",
+            ]
+            detail.update("\n".join(lines))
+            return
+
         if tab == "tab_domains":
             table = self.query_one("#domains", DataTable)
             if table.row_count <= 0 or table.cursor_row < 0:
@@ -502,11 +628,15 @@ class JumpAdminTui(App):
             "btn_config": "open_config",
             "btn_view_licenses": "view_licenses",
             "btn_view_domains": "view_domains",
+            "btn_view_sessions": "view_sessions",
             "btn_license_new": "license_new",
             "btn_primary": "primary",
             "btn_license_toggle": "license_toggle",
             "btn_license_revoke": "license_revoke",
             "btn_domain_delete": "domain_delete",
+            "btn_session_revoke": "session_revoke",
+            "btn_sessions_cleanup": "sessions_cleanup",
+            "btn_sessions_filter": "sessions_filter",
             "btn_edit_submit": "edit_submit",
             "btn_edit_cancel": "edit_cancel",
         }
@@ -537,6 +667,10 @@ class JumpAdminTui(App):
 
     async def action_view_domains(self) -> None:
         self._tabs().active = "tab_domains"
+        self._update_detail_from_focus()
+
+    async def action_view_sessions(self) -> None:
+        self._tabs().active = "tab_sessions"
         self._update_detail_from_focus()
 
     # -------------------------
@@ -827,6 +961,80 @@ class JumpAdminTui(App):
             return
 
         self.toast.show("완료")
+        await self.action_refresh()
+
+    # -------------------------
+    # Actions: session ops
+    # -------------------------
+    async def action_session_revoke(self) -> None:
+        if self._active_tab() != "tab_sessions":
+            self.toast.show("세션 탭에서만 사용할 수 있습니다.")
+            return
+        table = self.query_one("#sessions", DataTable)
+        if table.row_count <= 0 or table.cursor_row < 0:
+            self.toast.show("선택된 세션이 없습니다.")
+            return
+        row = table.get_row_at(table.cursor_row)
+        sid = str(row[0])
+        if not self._confirm_twice("session_revoke", sid):
+            return
+
+        if not self.api:
+            await self._ensure_api()
+        if not self.api:
+            return
+
+        self.toast.show("세션 종료 중...")
+        try:
+            await asyncio.to_thread(self.api.revoke_session, int(sid))
+        except ApiError as exc:
+            self.toast.show(f"오류: {exc} ({exc.status_code})")
+            return
+        except Exception as exc:
+            self.toast.show(f"오류: {exc}")
+            return
+
+        self.toast.show(f"세션 #{sid} 종료됨 — 30초 내 클라이언트 자동 로그아웃")
+        await self.action_refresh()
+
+    async def action_sessions_cleanup(self) -> None:
+        if self._active_tab() != "tab_sessions":
+            self.toast.show("세션 탭에서만 사용할 수 있습니다.")
+            return
+        if not self._confirm_twice("sessions_cleanup", "stale"):
+            return
+
+        if not self.api:
+            await self._ensure_api()
+        if not self.api:
+            return
+
+        self.toast.show("오래된 세션 정리 중... (heartbeat 30분 이상 끊긴 세션)")
+        try:
+            result = await asyncio.to_thread(self.api.cleanup_stale_sessions, 1800)
+        except ApiError as exc:
+            self.toast.show(f"오류: {exc} ({exc.status_code})")
+            return
+        except Exception as exc:
+            self.toast.show(f"오류: {exc}")
+            return
+
+        revoked = int((result or {}).get("revoked_count", 0))
+        self.toast.show(f"{revoked}개 stale 세션 일괄 폐기 완료")
+        await self.action_refresh()
+
+    async def action_sessions_filter(self) -> None:
+        if self._active_tab() != "tab_sessions":
+            self.toast.show("세션 탭에서만 사용할 수 있습니다.")
+            return
+        # 순환: active → stale → revoked → all → active …
+        order = ["active", "stale", "revoked", "all"]
+        try:
+            idx = order.index(self._sessions_status_filter)
+        except ValueError:
+            idx = -1
+        self._sessions_status_filter = order[(idx + 1) % len(order)]
+        self.toast.show(f"세션 필터: {self._sessions_status_filter}")
         await self.action_refresh()
 
 
