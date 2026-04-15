@@ -199,20 +199,23 @@ def download_update(
 # ── 설치 & 재시작 ──
 
 def install_and_restart_windows(setup_exe_path: Path) -> None:
-    """Windows: PowerShell 헬퍼로 부모 종료 대기 → 인스톨러 → 새 앱 자동 실행.
+    """Windows: CMD 배치 파일 launcher로 부모 종료 대기 → UAC 상승 → 설치 → 재시작.
 
-    Inno Setup의 /CLOSEAPPLICATIONS, /RESTARTAPPLICATIONS는 [Setup] 섹션의
-    CloseApplicationsFilter가 없으면 신뢰성이 낮음. PowerShell 헬퍼가
-    명시적으로 (1) 부모 종료 (2) 설치 wait (3) 새 앱 실행 처리.
+    설계 원칙 (과거 PowerShell 방식의 문제 수정):
+      1. Nuitka onefile의 Job Object에서 탈출 (CREATE_BREAKAWAY_FROM_JOB)
+         → 부모 종료 시 헬퍼가 함께 killed 되지 않음
+      2. cmd.exe (PowerShell 아님) — AV/ExecutionPolicy 방해 최소
+      3. 설치는 `start "" /wait` 로 실행 — 내부 UAC 상승이 정상 동작
+      4. 모든 단계를 log_dir 에 직접 기록 (Start-Transcript 같은 추가 메커니즘 불필요)
+      5. CREATE_NO_WINDOW / DETACHED_PROCESS 상호 배타 충돌 제거
     """
-    # 로그 디렉토리 — 최대한 일찍 확보 (진단용 Python 로그 저장)
+    # 로그 디렉토리 — 가장 먼저 확보
     log_dir = Path(os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))) / "jump_worker_dashboard"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "update.log"
     py_log_path = log_dir / "update_py.log"
+    bat_log_path = log_dir / "update.log"
 
     def _pylog(msg: str) -> None:
-        """Python 쪽에서 PowerShell 실행 전 단계까지의 진단 로그."""
         try:
             with open(py_log_path, "a", encoding="utf-8") as f:
                 from datetime import datetime as _dt
@@ -221,131 +224,126 @@ def install_and_restart_windows(setup_exe_path: Path) -> None:
             pass
 
     _pylog("=" * 60)
-    _pylog(f"install_and_restart_windows called")
+    _pylog(f"install_and_restart_windows called (cmd.exe launcher)")
     _pylog(f"setup_exe_path={setup_exe_path}")
     _pylog(f"setup_exe exists={setup_exe_path.exists()}")
     _pylog(f"setup_exe size={setup_exe_path.stat().st_size if setup_exe_path.exists() else 'N/A'}")
     _pylog(f"sys.executable={sys.executable}")
-    _pylog(f"cwd={os.getcwd()}")
+    _pylog(f"parent_pid={os.getpid()}")
     _pylog(f"LOCALAPPDATA={os.environ.get('LOCALAPPDATA', '(unset)')}")
-    _pylog(f"USERPROFILE={os.environ.get('USERPROFILE', '(unset)')}")
 
     if not setup_exe_path.exists():
         _pylog("FATAL: installer file missing — aborting")
         raise UpdateError(f"인스톨러 파일이 없습니다: {setup_exe_path}")
 
-    # 임시 PowerShell 스크립트
-    tmp_dir = Path(tempfile.gettempdir()) / f"jump_update_{os.getpid()}"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    script_path = tmp_dir / "update.ps1"
-    _pylog(f"tmp_dir={tmp_dir}")
-    _pylog(f"log_path={log_path}")
+    # 배치 파일을 log_dir 에 직접 작성 (tmp 는 onefile 환경에서 사라질 수 있음)
+    bat_path = log_dir / "update.bat"
+    parent_pid = os.getpid()
 
-    # 인스톨러는 {autopf}\GUARDIAN 에 설치됨 (.iss 의 DefaultDirName)
-    # 64-bit Windows: C:\Program Files\GUARDIAN
-    setup_exe_str = str(setup_exe_path).replace("'", "''")
-    log_path_str = str(log_path).replace("'", "''")
+    # cmd.exe 배치 스크립트 — PowerShell 의존성 제거
+    bat_script = f"""@echo off
+setlocal enabledelayedexpansion
 
-    ps_script = f"""$ErrorActionPreference = "Continue"
-Start-Transcript -Path '{log_path_str}' -Force
+rem ── 로그 초기화 ──
+set "LOG={bat_log_path}"
+echo [%date% %time%] === Update started (parent PID={parent_pid}) === > "%LOG%"
 
-Write-Host "=== Update started: $(Get-Date) ==="
-
-# 1. 부모 앱 완전 종료 대기
-Start-Sleep -Seconds 3
-Get-Process -Name "jump-worker-dashboard" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 2
-
-# 2. 인스톨러 실행 + 종료 대기
-Write-Host "Running installer: {setup_exe_str}"
-$proc = Start-Process -FilePath '{setup_exe_str}' -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-' -Wait -PassThru
-Write-Host "Installer exit code: $($proc.ExitCode)"
-
-# 3. 설치 경로 추정 + 새 앱 실행
-Start-Sleep -Seconds 2
-$candidates = @(
-    "$env:ProgramFiles\\GUARDIAN\\jump-worker-dashboard.exe",
-    "${{env:ProgramFiles(x86)}}\\GUARDIAN\\jump-worker-dashboard.exe",
-    "$env:LOCALAPPDATA\\Programs\\GUARDIAN\\jump-worker-dashboard.exe"
+rem ── 1. 부모 프로세스 종료 대기 (최대 30초) ──
+echo [%date% %time%] Waiting for parent app to exit... >> "%LOG%"
+set /a _tries=0
+:waitloop
+tasklist /FI "IMAGENAME eq jump-worker-dashboard.exe" 2>nul | find /I "jump-worker-dashboard.exe" >nul
+if errorlevel 1 goto parentgone
+set /a _tries+=1
+if !_tries! geq 30 (
+    echo [%date% %time%] Timeout waiting — force killing >> "%LOG%"
+    taskkill /F /IM jump-worker-dashboard.exe /T >> "%LOG%" 2>&1
+    goto parentgone
 )
-$exe = $null
-foreach ($c in $candidates) {{
-    if (Test-Path $c) {{ $exe = $c; break }}
-}}
+timeout /t 1 /nobreak >nul
+goto waitloop
 
-# 레지스트리에서 Inno Setup uninstall 정보로 위치 추가 탐색
-if (-not $exe) {{
-    $regPaths = @(
-        'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',
-        'HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',
-        'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'
+:parentgone
+echo [%date% %time%] Parent exited — proceeding with install >> "%LOG%"
+timeout /t 2 /nobreak >nul
+
+rem ── 2. 인스톨러 실행 (UAC 내부 상승) ──
+echo [%date% %time%] Running installer: {setup_exe_path} >> "%LOG%"
+"{setup_exe_path}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- >> "%LOG%" 2>&1
+set _rc=!errorlevel!
+echo [%date% %time%] Installer exit code: !_rc! >> "%LOG%"
+
+rem ── 3. 설치 검증 ──
+timeout /t 2 /nobreak >nul
+set "EXE="
+for %%p in (
+    "%ProgramFiles%\\GUARDIAN\\jump-worker-dashboard.exe"
+    "%ProgramFiles(x86)%\\GUARDIAN\\jump-worker-dashboard.exe"
+    "%LOCALAPPDATA%\\Programs\\GUARDIAN\\jump-worker-dashboard.exe"
+) do (
+    if exist %%~p (
+        set "EXE=%%~p"
+        goto foundexe
     )
-    foreach ($r in $regPaths) {{
-        $items = Get-ItemProperty $r -ErrorAction SilentlyContinue | Where-Object {{ $_.DisplayName -like "*GUARDIAN*" }}
-        foreach ($i in $items) {{
-            if ($i.InstallLocation) {{
-                $candidate = Join-Path $i.InstallLocation "jump-worker-dashboard.exe"
-                if (Test-Path $candidate) {{ $exe = $candidate; break }}
-            }}
-        }}
-        if ($exe) {{ break }}
-    }}
-}}
+)
 
-if ($exe) {{
-    Write-Host "Starting: $exe"
-    Start-Process -FilePath $exe
-}} else {{
-    Write-Host "ERROR: jump-worker-dashboard.exe not found in any expected location"
-}}
+rem 레지스트리 fallback
+for /f "tokens=2*" %%a in ('reg query "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall" /s /f "GUARDIAN" 2^>nul ^| find "InstallLocation"') do (
+    if exist "%%~b\\jump-worker-dashboard.exe" (
+        set "EXE=%%~b\\jump-worker-dashboard.exe"
+        goto foundexe
+    )
+)
 
-# 임시 스크립트 정리
-Start-Sleep -Seconds 2
-Remove-Item -Recurse -Force '{str(tmp_dir).replace("'", "''")}' -ErrorAction SilentlyContinue
+echo [%date% %time%] ERROR: exe not found after install >> "%LOG%"
+goto done
 
-Write-Host "=== Update done: $(Get-Date) ==="
-Stop-Transcript
+:foundexe
+echo [%date% %time%] Launching: !EXE! >> "%LOG%"
+start "" "!EXE!"
+
+:done
+echo [%date% %time%] === Update done === >> "%LOG%"
+endlocal
 """
-    script_path.write_text(ps_script, encoding="utf-8")
-    _pylog(f"Wrote PowerShell script: {script_path} ({script_path.stat().st_size} bytes)")
+    bat_path.write_text(bat_script, encoding="cp949", errors="replace")
+    _pylog(f"Wrote batch script: {bat_path} ({bat_path.stat().st_size} bytes)")
 
-    # 진단용: .ps1 사본을 로그 디렉토리에도 저장 (tmp_dir은 PowerShell이 지우므로)
-    try:
-        shutil.copy2(script_path, log_dir / "update.ps1")
-    except Exception as exc:
-        _pylog(f"Warning: failed to copy ps1 to log_dir: {exc}")
+    # ── Windows 상수 ──
+    # CREATE_NEW_PROCESS_GROUP: 0x00000200 — Ctrl+C 전파 차단
+    # CREATE_BREAKAWAY_FROM_JOB: 0x01000000 — 부모 Job Object에서 탈출 (Nuitka onefile 대응)
+    # CREATE_NEW_CONSOLE: 0x00000010 — 독립 콘솔 (사용자에게 안 보이도록 SW_HIDE로 숨김)
+    CREATE_NEW_PROCESS_GROUP = 0x00000200
+    CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+    CREATE_NEW_CONSOLE = 0x00000010
+    creationflags = CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_CONSOLE
 
-    # DETACHED_PROCESS = 0x00000008, CREATE_NEW_PROCESS_GROUP = 0x00000200
-    creationflags = 0
-    if hasattr(subprocess, "DETACHED_PROCESS"):
-        creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-    if hasattr(subprocess, "CREATE_NO_WINDOW"):
-        creationflags |= subprocess.CREATE_NO_WINDOW
+    # SW_HIDE = 0 — 콘솔 창 숨기기
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0  # SW_HIDE
 
     try:
         proc = subprocess.Popen(
-            [
-                "powershell.exe",
-                "-NoProfile",
-                "-ExecutionPolicy", "Bypass",
-                "-WindowStyle", "Hidden",
-                "-File", str(script_path),
-            ],
+            ["cmd.exe", "/c", str(bat_path)],
             creationflags=creationflags,
+            startupinfo=startupinfo,
             close_fds=True,
+            cwd=str(log_dir),
         )
-        _pylog(f"PowerShell launched: PID={proc.pid}")
+        _pylog(f"cmd.exe launched: PID={proc.pid}")
     except FileNotFoundError as exc:
-        _pylog(f"FATAL: powershell.exe not found: {exc}")
-        raise UpdateError(
-            "PowerShell을 찾을 수 없습니다. Windows PowerShell이 활성화되어 있는지 확인하세요."
-        ) from exc
+        _pylog(f"FATAL: cmd.exe not found: {exc}")
+        raise UpdateError("시스템 오류: cmd.exe를 찾을 수 없습니다.") from exc
     except Exception as exc:
-        _pylog(f"FATAL: PowerShell launch failed: {type(exc).__name__}: {exc}")
+        _pylog(f"FATAL: cmd.exe launch failed: {type(exc).__name__}: {exc}")
         raise UpdateError(f"업데이트 헬퍼 실행 실패: {exc}") from exc
 
-    _pylog("install_and_restart_windows: exiting parent process (os._exit)")
-    # 현재 앱 종료 — PowerShell 헬퍼가 모든 후속 작업 처리
+    _pylog("install_and_restart_windows: exiting parent process")
+    # 부모 앱 종료 — 헬퍼가 모든 후속 작업 처리
+    # 아주 짧게 대기해서 Popen이 완전히 분리되도록
+    import time as _t
+    _t.sleep(0.3)
     os._exit(0)
 
 

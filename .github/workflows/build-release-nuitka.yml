@@ -193,8 +193,14 @@ jobs:
       - name: Build Inno Setup installer
         shell: pwsh
         run: |
+          # Tag 에서 버전 추출 (refs/tags/v1.0.8 → 1.0.8, 없으면 0.3.0 fallback)
+          $ver = "0.3.0"
+          if ($env:GITHUB_REF -like "refs/tags/v*") {
+            $ver = $env:GITHUB_REF -replace "refs/tags/v", ""
+          }
+          Write-Host "Building installer for version: $ver"
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          & $iscc jump_worker_dashboard\installer\guardian-setup.iss /O"jump_worker_dashboard\dist" /Q
+          & $iscc /DAppVersion="$ver" jump_worker_dashboard\installer\guardian-setup.iss /O"jump_worker_dashboard\dist" /Q
           if ($LASTEXITCODE -ne 0) {
             Write-Error "Inno Setup compilation failed (exit $LASTEXITCODE)"
             exit 1

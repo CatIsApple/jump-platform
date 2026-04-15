@@ -2,7 +2,10 @@
 ; 설치 시 Windows Defender 예외 자동 등록
 
 #define AppName "GUARDIAN"
-#define AppVersion "0.3.0"
+; AppVersion은 CI에서 ISCC /DAppVersion=x.y.z 로 덮어씀 (없으면 0.3.0 fallback)
+#ifndef AppVersion
+  #define AppVersion "0.3.0"
+#endif
 #define AppPublisher "GUARDIAN"
 #define AppExeName "jump-worker-dashboard.exe"
 
@@ -25,6 +28,10 @@ UninstallDisplayIcon={app}\calendar.ico
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+; 자동 업데이트: 실행 중 앱 감지 → 종료 후 설치
+CloseApplications=yes
+CloseApplicationsFilter=*.exe,*.dll
+RestartApplications=no
 
 [Languages]
 Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
