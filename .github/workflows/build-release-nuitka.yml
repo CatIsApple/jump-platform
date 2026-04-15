@@ -298,8 +298,8 @@ jobs:
 
       - name: Register releases in backend (D1)
         env:
-          # CI 전용 엔드포인트 /v1/ci/releases — CF Access 밖, X-Admin-Token만 검증
-          CI_ENDPOINT: https://api.guardian01.online/v1/ci/releases
+          # CI 전용 엔드포인트 — workers.dev 직접 호출 (CF 프록시/봇매니지먼트 우회)
+          CI_ENDPOINT: https://jump-backend.guardian01.workers.dev/v1/ci/releases
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
           VERSION: ${{ steps.meta.outputs.version }}
           WIN_FILE: ${{ steps.meta.outputs.win_file }}

@@ -2,6 +2,10 @@ name = "jump-backend"
 main = "src/index.ts"
 compatibility_date = "2026-02-15"
 
+# workers.dev 서브도메인 활성화 (CI에서 CF 프록시/봇매니지먼트 우회용)
+# jump-backend.guardian01.workers.dev
+workers_dev = true
+
 # 커스텀 도메인 라우팅은 아래를 채운 뒤 배포하세요.
 routes = [
   { pattern = "api.guardian01.online/*", zone_name = "guardian01.online" }
