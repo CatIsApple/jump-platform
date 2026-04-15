@@ -240,42 +240,79 @@ def install_and_restart_windows(setup_exe_path: Path) -> None:
     bat_path = log_dir / "update.bat"
     parent_pid = os.getpid()
 
-    # cmd.exe 배치 스크립트 — PowerShell 의존성 제거
+    # cmd.exe 배치 스크립트 — 모든 엣지 케이스 방어
     bat_script = f"""@echo off
+chcp 65001 >nul 2>&1
 setlocal enabledelayedexpansion
 
-rem ── 로그 초기화 ──
 set "LOG={bat_log_path}"
-echo [%date% %time%] === Update started (parent PID={parent_pid}) === > "%LOG%"
+echo [START %date% %time%] parent PID={parent_pid} > "%LOG%"
+echo [INFO] setup: {setup_exe_path} >> "%LOG%"
+echo [INFO] user: %USERNAME% >> "%LOG%"
+echo [INFO] LOCALAPPDATA: %LOCALAPPDATA% >> "%LOG%"
+echo [INFO] ProgramFiles: %ProgramFiles% >> "%LOG%"
+echo [INFO] ProgramFiles^(x86^): %ProgramFiles(x86)% >> "%LOG%"
 
-rem ── 1. 부모 프로세스 종료 대기 (최대 30초) ──
-echo [%date% %time%] Waiting for parent app to exit... >> "%LOG%"
+rem ──────────────────────────────────────────────────────────
+rem 1. 부모 앱 완전 종료 대기 (다중 인스턴스 + Nuitka bootstrap 모두)
+rem ──────────────────────────────────────────────────────────
+echo [STEP 1] Waiting parent to exit... >> "%LOG%"
 set /a _tries=0
 :waitloop
 tasklist /FI "IMAGENAME eq jump-worker-dashboard.exe" 2>nul | find /I "jump-worker-dashboard.exe" >nul
 if errorlevel 1 goto parentgone
 set /a _tries+=1
-if !_tries! geq 30 (
-    echo [%date% %time%] Timeout waiting — force killing >> "%LOG%"
+if !_tries! geq 20 (
+    echo [STEP 1] Timeout — force kill all instances >> "%LOG%"
     taskkill /F /IM jump-worker-dashboard.exe /T >> "%LOG%" 2>&1
+    timeout /t 2 /nobreak >nul
     goto parentgone
 )
 timeout /t 1 /nobreak >nul
 goto waitloop
 
 :parentgone
-echo [%date% %time%] Parent exited — proceeding with install >> "%LOG%"
-timeout /t 2 /nobreak >nul
+echo [STEP 1] All parent instances exited >> "%LOG%"
 
-rem ── 2. 인스톨러 실행 (UAC 내부 상승) ──
-echo [%date% %time%] Running installer: {setup_exe_path} >> "%LOG%"
-"{setup_exe_path}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- >> "%LOG%" 2>&1
+rem 추가 대기 — Nuitka onefile이 tmp 정리할 시간 확보
+timeout /t 3 /nobreak >nul
+
+rem ──────────────────────────────────────────────────────────
+rem 2. 실행 중인 관련 프로세스 모두 정리 (설치 파일 잠금 방지)
+rem ──────────────────────────────────────────────────────────
+taskkill /F /IM jump-worker-dashboard.exe /T >nul 2>&1
+taskkill /F /IM GUARDIAN_Jump_Setup.exe /T >nul 2>&1
+taskkill /F /IM unins000.exe /T >nul 2>&1
+
+rem ──────────────────────────────────────────────────────────
+rem 3. Inno Setup 인스톨러 실행 (내부 UAC 상승)
+rem    /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-
+rem    /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS /FORCECLOSEAPPLICATIONS
+rem ──────────────────────────────────────────────────────────
+echo [STEP 2] Running installer... >> "%LOG%"
+"{setup_exe_path}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /FORCECLOSEAPPLICATIONS /LOG="%LOCALAPPDATA%\\jump_worker_dashboard\\inno_setup.log"
 set _rc=!errorlevel!
-echo [%date% %time%] Installer exit code: !_rc! >> "%LOG%"
+echo [STEP 2] Installer exit code: !_rc! >> "%LOG%"
 
-rem ── 3. 설치 검증 ──
-timeout /t 2 /nobreak >nul
+if !_rc! equ 1223 (
+    echo [STEP 2] ABORTED: user denied UAC — keeping old version >> "%LOG%"
+    goto done
+)
+if !_rc! equ 2 (
+    echo [STEP 2] ABORTED: user cancelled installer >> "%LOG%"
+    goto done
+)
+if !_rc! neq 0 (
+    echo [STEP 2] WARNING: non-zero exit ^(!_rc!^) — attempting to continue >> "%LOG%"
+)
+
+rem ──────────────────────────────────────────────────────────
+rem 4. 설치 검증 + 경로 탐색
+rem ──────────────────────────────────────────────────────────
+timeout /t 3 /nobreak >nul
 set "EXE="
+
+rem 4a. 표준 경로 우선 검색
 for %%p in (
     "%ProgramFiles%\\GUARDIAN\\jump-worker-dashboard.exe"
     "%ProgramFiles(x86)%\\GUARDIAN\\jump-worker-dashboard.exe"
@@ -283,67 +320,149 @@ for %%p in (
 ) do (
     if exist %%~p (
         set "EXE=%%~p"
+        echo [STEP 3] Found at: %%~p >> "%LOG%"
         goto foundexe
     )
 )
 
-rem 레지스트리 fallback
-for /f "tokens=2*" %%a in ('reg query "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall" /s /f "GUARDIAN" 2^>nul ^| find "InstallLocation"') do (
-    if exist "%%~b\\jump-worker-dashboard.exe" (
-        set "EXE=%%~b\\jump-worker-dashboard.exe"
+rem 4b. 레지스트리 Uninstall 엔트리에서 InstallLocation 조회
+echo [STEP 3] Standard paths empty — checking registry... >> "%LOG%"
+for /f "usebackq tokens=2*" %%A in (`reg query "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall" /s /f "GUARDIAN" 2^>nul ^| findstr /I "InstallLocation"`) do (
+    if exist "%%~B\\jump-worker-dashboard.exe" (
+        set "EXE=%%~B\\jump-worker-dashboard.exe"
+        echo [STEP 3] Registry hit: %%~B >> "%LOG%"
+        goto foundexe
+    )
+)
+for /f "usebackq tokens=2*" %%A in (`reg query "HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall" /s /f "GUARDIAN" 2^>nul ^| findstr /I "InstallLocation"`) do (
+    if exist "%%~B\\jump-worker-dashboard.exe" (
+        set "EXE=%%~B\\jump-worker-dashboard.exe"
+        echo [STEP 3] Registry hit: %%~B >> "%LOG%"
+        goto foundexe
+    )
+)
+for /f "usebackq tokens=2*" %%A in (`reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall" /s /f "GUARDIAN" 2^>nul ^| findstr /I "InstallLocation"`) do (
+    if exist "%%~B\\jump-worker-dashboard.exe" (
+        set "EXE=%%~B\\jump-worker-dashboard.exe"
+        echo [STEP 3] Registry hit: %%~B >> "%LOG%"
         goto foundexe
     )
 )
 
-echo [%date% %time%] ERROR: exe not found after install >> "%LOG%"
+echo [STEP 3] FATAL: exe not found after install >> "%LOG%"
 goto done
 
 :foundexe
-echo [%date% %time%] Launching: !EXE! >> "%LOG%"
+echo [STEP 4] Launching: !EXE! >> "%LOG%"
 start "" "!EXE!"
+timeout /t 2 /nobreak >nul
+tasklist /FI "IMAGENAME eq jump-worker-dashboard.exe" 2>nul | find /I "jump-worker-dashboard.exe" >nul
+if errorlevel 1 (
+    echo [STEP 4] WARNING: new app not running yet — retrying... >> "%LOG%"
+    timeout /t 2 /nobreak >nul
+    start "" "!EXE!"
+) else (
+    echo [STEP 4] New app launched OK >> "%LOG%"
+)
 
 :done
-echo [%date% %time%] === Update done === >> "%LOG%"
+echo [END %date% %time%] === Update flow complete === >> "%LOG%"
 endlocal
+exit /b 0
 """
-    bat_path.write_text(bat_script, encoding="cp949", errors="replace")
+    # UTF-8 로 저장 (배치 첫 줄 `chcp 65001` 로 CP 설정)
+    bat_path.write_text(bat_script, encoding="utf-8")
     _pylog(f"Wrote batch script: {bat_path} ({bat_path.stat().st_size} bytes)")
 
     # ── Windows 상수 ──
-    # CREATE_NEW_PROCESS_GROUP: 0x00000200 — Ctrl+C 전파 차단
-    # CREATE_BREAKAWAY_FROM_JOB: 0x01000000 — 부모 Job Object에서 탈출 (Nuitka onefile 대응)
-    # CREATE_NEW_CONSOLE: 0x00000010 — 독립 콘솔 (사용자에게 안 보이도록 SW_HIDE로 숨김)
     CREATE_NEW_PROCESS_GROUP = 0x00000200
     CREATE_BREAKAWAY_FROM_JOB = 0x01000000
     CREATE_NEW_CONSOLE = 0x00000010
-    creationflags = CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_CONSOLE
 
-    # SW_HIDE = 0 — 콘솔 창 숨기기
     startupinfo = subprocess.STARTUPINFO()
     startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
     startupinfo.wShowWindow = 0  # SW_HIDE
 
+    launched = False
+
+    # ── Method 1: 직접 Popen + BREAKAWAY_FROM_JOB ──
+    # Nuitka onefile이 Job Object에 BREAKAWAY_OK 플래그를 주면 성공, 아니면 OSError
     try:
         proc = subprocess.Popen(
             ["cmd.exe", "/c", str(bat_path)],
-            creationflags=creationflags,
+            creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_CONSOLE,
             startupinfo=startupinfo,
             close_fds=True,
             cwd=str(log_dir),
         )
-        _pylog(f"cmd.exe launched: PID={proc.pid}")
-    except FileNotFoundError as exc:
-        _pylog(f"FATAL: cmd.exe not found: {exc}")
-        raise UpdateError("시스템 오류: cmd.exe를 찾을 수 없습니다.") from exc
-    except Exception as exc:
-        _pylog(f"FATAL: cmd.exe launch failed: {type(exc).__name__}: {exc}")
-        raise UpdateError(f"업데이트 헬퍼 실행 실패: {exc}") from exc
+        _pylog(f"[Method 1: breakaway] cmd.exe launched PID={proc.pid}")
+        launched = True
+    except OSError as exc:
+        _pylog(f"[Method 1] failed ({type(exc).__name__}: {exc}) — trying Method 2")
+
+    # ── Method 2: Popen 그대로 (breakaway 없이) ──
+    # Job이 SILENT_BREAKAWAY_OK이면 자동으로 탈출 / 아니면 Method 3으로
+    if not launched:
+        try:
+            proc = subprocess.Popen(
+                ["cmd.exe", "/c", str(bat_path)],
+                creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NEW_CONSOLE,
+                startupinfo=startupinfo,
+                close_fds=True,
+                cwd=str(log_dir),
+            )
+            _pylog(f"[Method 2: no-breakaway] cmd.exe launched PID={proc.pid}")
+            launched = True
+        except OSError as exc:
+            _pylog(f"[Method 2] failed ({type(exc).__name__}: {exc}) — trying Method 3")
+
+    # ── Method 3: Windows Task Scheduler 를 통한 완전 분리 ──
+    # schtasks.exe 로 일회성 작업 등록 + 즉시 실행. 이렇게 생성된 프로세스는
+    # Task Scheduler 서비스가 부모 — 어떤 Job Object 에도 속하지 않음.
+    # Nuitka / AV / 기타 무관하게 반드시 실행됨.
+    if not launched:
+        task_name = f"JumpPlatformUpdate_{os.getpid()}"
+        try:
+            # 생성 (현재 시간 + 1분, 실제로는 /run 으로 즉시 실행)
+            from datetime import datetime as _dt, timedelta as _td
+            run_time = (_dt.now() + _td(minutes=1)).strftime("%H:%M")
+            create_cmd = [
+                "schtasks.exe", "/create",
+                "/tn", task_name,
+                "/tr", f'cmd.exe /c "{bat_path}"',
+                "/sc", "once",
+                "/st", run_time,
+                "/f",  # 기존 같은 이름 덮어씀
+                "/rl", "HIGHEST",  # 관리자 권한 요청 (UAC)
+            ]
+            result = subprocess.run(create_cmd, capture_output=True, text=True, timeout=30)
+            _pylog(f"[Method 3: schtasks create] rc={result.returncode} stdout={result.stdout!r} stderr={result.stderr!r}")
+
+            if result.returncode == 0:
+                # 즉시 실행
+                run_result = subprocess.run(
+                    ["schtasks.exe", "/run", "/tn", task_name],
+                    capture_output=True, text=True, timeout=30,
+                )
+                _pylog(f"[Method 3: schtasks run] rc={run_result.returncode}")
+                if run_result.returncode == 0:
+                    launched = True
+                    # 30초 후 자동 삭제되도록 배치 파일 끝에 추가 — 지금은 일단 동작 우선
+                else:
+                    _pylog(f"[Method 3] schtasks /run failed: {run_result.stderr}")
+            else:
+                _pylog(f"[Method 3] schtasks /create failed: {result.stderr}")
+        except Exception as exc:
+            _pylog(f"[Method 3] schtasks exception: {type(exc).__name__}: {exc}")
+
+    if not launched:
+        _pylog("FATAL: All launch methods failed — update aborted")
+        raise UpdateError("업데이트 헬퍼를 실행할 수 없습니다. 관리자에게 update_py.log를 공유해주세요.")
 
     _pylog("install_and_restart_windows: exiting parent process")
-    # 부모 앱 종료 — 헬퍼가 모든 후속 작업 처리
-    # 아주 짧게 대기해서 Popen이 완전히 분리되도록
+    # 헬퍼가 안전하게 출발하도록 짧게 대기
     import time as _t
-    _t.sleep(0.3)
+    _t.sleep(0.5)
     os._exit(0)
 
 

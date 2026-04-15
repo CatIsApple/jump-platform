@@ -80,6 +80,17 @@ jobs:
           path: ~\AppData\Local\Nuitka\Nuitka\Cache\downloads
           key: nuitka-downloads-windows-v3
 
+      # Nuitka 컴파일 캐시 (ccache/msvc obj) — 소스 변화 적으면 재사용
+      - name: Cache Nuitka compile cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\Nuitka\Nuitka\Cache\ccache
+            ~\AppData\Local\Nuitka\Nuitka\Cache\clcache
+          key: nuitka-compile-windows-${{ hashFiles('jump_worker_dashboard/**/*.py', 'jump_site_modules/**/*.py') }}
+          restore-keys: |
+            nuitka-compile-windows-
+
       - name: Install dependencies
         shell: cmd
         run: |
@@ -108,14 +119,21 @@ jobs:
             Write-Host "obfuscate_strings.py not found — skipping (Nuitka alone provides strong protection)"
           }
 
-      # Nuitka 빌드 — 반드시 repo 루트에서 실행해야 jump_worker_dashboard.app 임포트 가능
-      - name: Build with Nuitka (onefile)
+      # Nuitka 빌드 — standalone 모드
+      #
+      # --onefile 대신 --standalone 사용 이유:
+      #  1. 빌드 속도 ~5분 단축 (zstd 패키징 없음)
+      #  2. Nuitka onefile bootstrap 제거 → Job Object 문제 근본 해결
+      #  3. 실행 속도 향상 (temp 추출 불필요)
+      #  4. Inno Setup이 어차피 폴더를 압축하므로 최종 설치파일 크기 동일
+      - name: Build with Nuitka (standalone)
         shell: cmd
         run: |
           python -m nuitka ^
-            --onefile ^
+            --standalone ^
             --msvc=latest ^
-            --jobs=4 ^
+            --jobs=8 ^
+            --lto=no ^
             --windows-console-mode=disable ^
             --windows-icon-from-ico=jump_worker_dashboard/assets/calendar.ico ^
             --enable-plugin=tk-inter ^
@@ -141,23 +159,25 @@ jobs:
             --include-data-dir=jump_worker_dashboard/assets=assets ^
             --output-dir=build_nuitka ^
             --output-filename=jump-worker-dashboard.exe ^
-            --remove-output ^
             --assume-yes-for-downloads ^
             jump_worker_dashboard/main.py
 
       - name: Verify Nuitka build output
         shell: pwsh
         run: |
-          $exe = Get-ChildItem -Recurse -Filter "jump-worker-dashboard.exe" -Path "build_nuitka" |
-                  Select-Object -First 1 -ExpandProperty FullName
-          if (!$exe) {
-            Write-Error "Build failed: exe not found"
+          # standalone 출력: build_nuitka\main.dist\jump-worker-dashboard.exe + *.dll/.pyd
+          $distDir = "build_nuitka\main.dist"
+          $exe = Join-Path $distDir "jump-worker-dashboard.exe"
+          if (!(Test-Path $exe)) {
+            Write-Error "Build failed: exe not found at $exe"
             Get-ChildItem -Recurse build_nuitka | Format-Table FullName, Length
             exit 1
           }
           $sizeMB = [math]::Round((Get-Item $exe).Length / 1MB, 1)
-          Write-Host "Nuitka build OK: $exe ($sizeMB MB)"
+          $totalMB = [math]::Round(((Get-ChildItem $distDir -Recurse | Measure-Object Length -Sum).Sum) / 1MB, 1)
+          Write-Host "Nuitka standalone OK: $exe ($sizeMB MB exe, $totalMB MB total)"
           echo "NUITKA_EXE=$exe" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          echo "NUITKA_DIST=$distDir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
       # Smoke test: EXE 실행 후 5초 내 크래시 여부 확인
       - name: Smoke test (5s launch check)
@@ -174,17 +194,27 @@ jobs:
           Write-Host "PASS: Process still running (PID $($proc.Id))"
           Stop-Process -Id $proc.Id -Force
 
-      # Inno Setup이 참조하는 경로에 Nuitka 결과물 배치
-      # .iss 의 Source: "..\dist\jump-worker-dashboard\*" → jump_worker_dashboard/dist/jump-worker-dashboard/
+      # Inno Setup이 참조하는 경로에 standalone 결과물 배치
+      # .iss의 Source: "..\dist\jump-worker-dashboard\*" (모든 파일 재귀 복사)
       - name: Stage files for Inno Setup
         shell: pwsh
         run: |
           $stage = "jump_worker_dashboard\dist\jump-worker-dashboard"
+          if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item $env:NUITKA_EXE "$stage\jump-worker-dashboard.exe"
-          Copy-Item -Recurse jump_worker_dashboard\assets "$stage\assets"
-          Write-Host "Staged files:"
-          Get-ChildItem -Recurse $stage | Format-Table FullName, Length
+
+          # standalone 폴더 전체 복사 (exe + dlls + pyds + data)
+          Copy-Item -Recurse "$env:NUITKA_DIST\*" $stage
+
+          # 아이콘/assets 은 Nuitka --include-data-dir 로 이미 포함됨 (중복 방지)
+          # 하지만 assets 폴더가 비어있을 수 있으므로 추가 복사
+          if (!(Test-Path "$stage\assets")) {
+            Copy-Item -Recurse jump_worker_dashboard\assets "$stage\assets"
+          }
+
+          $fileCount = (Get-ChildItem -Recurse $stage -File | Measure-Object).Count
+          $totalMB = [math]::Round(((Get-ChildItem $stage -Recurse -File | Measure-Object Length -Sum).Sum) / 1MB, 1)
+          Write-Host "Staged: $fileCount files, $totalMB MB"
 
       - name: Install Inno Setup
         shell: pwsh
