@@ -300,4 +300,66 @@ npx wrangler r2 object delete jump-platform-releases/releases/vX.Y.Z/GUARDIAN_Ju
 2. **태그 누락**: `git push origin main`만 하면 Nuitka 빌드 안 됨, `git tag` + `git push origin TAG` 필수
 3. **macOS .app 복사/복원 시 `cp -R` 사용**: 확장 속성 손실로 Mach-O 바이너리 손상. 반드시 `ditto` 사용.
 4. **zip 해제 시 Python `zipfile`**: 심볼릭 링크 미지원. `ditto -x -k` 또는 `unzip` 사용 (이미 `updater.py`가 처리).
-5. **커밋 메시지 = 유저에게 보이는 notes**: 기술 용어 아닌 유저 친화적으로 작성
+5. **커밋 메시지 = 유저에게 보이는 notes**: 기술 용어 아닌 유저 친화적으로 작성. `_sanitize_release_notes()` 가 `Co-Authored-By`, `heartbeat`, `D1`, `R2`, `Nuitka` 등 자동 필터.
+
+## Windows 자동 업데이트 — 검증된 아키텍처 (v1.0.9+)
+
+### 절대 지키기
+1. **Nuitka `--onefile` 유지** (팀 합의). `--standalone` 전환 금지 (과거 문제 있었음).
+2. **`--jobs=4` 유지** — GH runner(4 물리코어)에서 8로 올리면 **더 느려짐** (컨텍스트 스위칭 오버헤드).
+3. **PowerShell 업데이트 헬퍼 금지** — Nuitka onefile Job Object 가 PowerShell grandchild 를 kill. `cmd.exe` + 배치파일만 사용.
+4. **`CREATE_NO_WINDOW` + `DETACHED_PROCESS` 조합 금지** — 상호 배타, 조용히 실패. `CREATE_NEW_CONSOLE` + `STARTUPINFO.wShowWindow=0` 사용.
+
+### install_and_restart_windows 3단계 폴백 (updater.py)
+| Method | 플래그 | 동작 |
+|---|---|---|
+| 1 | `CREATE_BREAKAWAY_FROM_JOB` | 부모 Job Object 탈출 시도 (Nuitka onefile 대응) |
+| 2 | flag 없음 | Job이 SILENT_BREAKAWAY_OK 인 경우 자동 탈출 |
+| 3 | `schtasks.exe` | Task Scheduler 서비스가 부모 — 100% 독립 실행 |
+
+### Inno Setup 필수 설정 (guardian-setup.iss)
+```ini
+PrivilegesRequired=admin            ; UAC 내부 상승 (정상 동작)
+CloseApplications=yes
+CloseApplicationsFilter=*.exe,*.dll ; 없으면 /CLOSEAPPLICATIONS 무효
+RestartApplications=no
+```
+
+### 진단 로그 (모두 `%LOCALAPPDATA%\jump_worker_dashboard\`)
+- `update_py.log` — Python 쪽 단계
+- `update.log` — cmd.exe 배치 실행 단계
+- `update.bat` — 실제 실행된 배치 사본
+- `inno_setup.log` — Inno Setup 자체 로그
+
+## 업데이트 흐름 테스트 (빌드 없이)
+
+```powershell
+# Windows에서
+cd <repo>
+python jump_worker_dashboard\scripts\test_update_flow.py
+# 또는 demo 릴리즈 등록 후 실제 앱에서 업데이트 버튼 클릭
+```
+
+Demo 릴리즈 등록 (테스트용, 기존 v1.0.9 setup exe 재사용):
+```bash
+curl -s -X POST "https://api.guardian01.online/v1/admin/releases" \
+  -H "CF-Access-Client-Id: <CLIENT_ID>" -H "CF-Access-Client-Secret: <CLIENT_SECRET>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "version":"1.0.99","platform":"windows",
+    "r2_key":"releases/v1.0.9/GUARDIAN_Jump_Setup.exe",
+    "filename":"GUARDIAN_Jump_Setup.exe",
+    "size":<SIZE>,"sha256":"<SHA256>"
+  }'
+# 테스트 완료 후: POST /v1/admin/releases/{id}/unpublish
+```
+
+## User-Agent 형식
+
+클라이언트는 실행 플랫폼을 반영한 UA 전송 (v1.1.0+):
+```
+Mozilla/5.0 (Windows NT 10.0; AMD64) jump-worker-dashboard/1.1.0 AppleWebKit/... Chrome/...
+Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) jump-worker-dashboard/1.1.0 AppleWebKit/...
+```
+관리자 UI가 `jump-worker-dashboard/{ver}` 토큰을 파싱해서 `Win/jump v1.1.0` / `macOS/jump v1.1.0` 로 표시.
+

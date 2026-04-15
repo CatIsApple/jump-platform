@@ -1,16 +1,46 @@
 from __future__ import annotations
 
 import json
+import platform as _platform
 from dataclasses import dataclass
 from typing import Any
 
 import requests
 
-DEFAULT_BACKEND_UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/122.0.0.0 Safari/537.36"
-)
+
+def _build_default_ua() -> str:
+    """실행 플랫폼을 반영한 User-Agent 문자열 생성.
+
+    백엔드가 세션 목록 UI에 OS/클라이언트를 구분해서 표시할 수 있도록
+    실제 플랫폼 정보를 포함. Mozilla 호환 포맷 + 앱 식별자.
+    """
+    system = _platform.system()
+    release = _platform.release()
+    machine = _platform.machine() or "x64"
+
+    try:
+        from jump_worker_dashboard import __version__ as _app_ver
+    except Exception:
+        _app_ver = "unknown"
+
+    if system == "Windows":
+        os_token = f"Windows NT {release or '10.0'}; {machine}"
+    elif system == "Darwin":
+        mac_ver = (_platform.mac_ver()[0] or "14.0").replace(".", "_")
+        os_token = f"Macintosh; Intel Mac OS X {mac_ver}"
+    elif system == "Linux":
+        os_token = f"X11; Linux {machine}"
+    else:
+        os_token = f"{system} {release}; {machine}"
+
+    return (
+        f"Mozilla/5.0 ({os_token}) "
+        f"jump-worker-dashboard/{_app_ver} "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    )
+
+
+DEFAULT_BACKEND_UA = _build_default_ua()
 
 
 class BackendError(RuntimeError):

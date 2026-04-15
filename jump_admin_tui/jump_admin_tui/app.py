@@ -31,6 +31,7 @@ def _ua_summary(ua: str) -> str:
     """User-Agent 문자열을 간략한 요약으로 변환."""
     if not ua:
         return "-"
+    import re as _re
     s = ua.lower()
     # OS 탐지
     if "windows" in s:
@@ -41,15 +42,18 @@ def _ua_summary(ua: str) -> str:
         os_name = "Linux"
     else:
         os_name = "?"
-    # 클라이언트 탐지 (jump-worker-dashboard는 python-requests 사용)
-    if "python-requests" in s or "python" in s:
+    # 클라이언트 탐지 — 앱 식별자 우선 (Chrome 같은 일반 토큰보다 먼저)
+    if "jump-worker-dashboard" in s:
+        m = _re.search(r"jump-worker-dashboard/([0-9][\w.\-]*)", ua, _re.I)
+        client = f"jump v{m.group(1)}" if m else "jump-client"
+    elif "python-requests" in s or "python" in s:
         client = "jump-client"
-    elif "chrome" in s:
-        client = "Chrome"
     elif "firefox" in s:
         client = "Firefox"
-    elif "safari" in s:
+    elif "safari" in s and "chrome" not in s:
         client = "Safari"
+    elif "chrome" in s:
+        client = "Chrome"
     else:
         client = ua[:20]
     return f"{os_name}/{client}"
