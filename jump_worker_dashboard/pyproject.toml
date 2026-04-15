@@ -1,6 +1,6 @@
 [project]
 name = "jump-worker-dashboard"
-version = "1.0.6"
+version = "1.0.7"
 description = "Worker dashboard (no login, no excel)"
 requires-python = ">=3.10"
 dependencies = [
