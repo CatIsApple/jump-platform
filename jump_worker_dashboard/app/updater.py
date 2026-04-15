@@ -205,16 +205,41 @@ def install_and_restart_windows(setup_exe_path: Path) -> None:
     CloseApplicationsFilter가 없으면 신뢰성이 낮음. PowerShell 헬퍼가
     명시적으로 (1) 부모 종료 (2) 설치 wait (3) 새 앱 실행 처리.
     """
+    # 로그 디렉토리 — 최대한 일찍 확보 (진단용 Python 로그 저장)
+    log_dir = Path(os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))) / "jump_worker_dashboard"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "update.log"
+    py_log_path = log_dir / "update_py.log"
+
+    def _pylog(msg: str) -> None:
+        """Python 쪽에서 PowerShell 실행 전 단계까지의 진단 로그."""
+        try:
+            with open(py_log_path, "a", encoding="utf-8") as f:
+                from datetime import datetime as _dt
+                f.write(f"[{_dt.now().isoformat(timespec='seconds')}] {msg}\n")
+        except Exception:
+            pass
+
+    _pylog("=" * 60)
+    _pylog(f"install_and_restart_windows called")
+    _pylog(f"setup_exe_path={setup_exe_path}")
+    _pylog(f"setup_exe exists={setup_exe_path.exists()}")
+    _pylog(f"setup_exe size={setup_exe_path.stat().st_size if setup_exe_path.exists() else 'N/A'}")
+    _pylog(f"sys.executable={sys.executable}")
+    _pylog(f"cwd={os.getcwd()}")
+    _pylog(f"LOCALAPPDATA={os.environ.get('LOCALAPPDATA', '(unset)')}")
+    _pylog(f"USERPROFILE={os.environ.get('USERPROFILE', '(unset)')}")
+
     if not setup_exe_path.exists():
+        _pylog("FATAL: installer file missing — aborting")
         raise UpdateError(f"인스톨러 파일이 없습니다: {setup_exe_path}")
 
     # 임시 PowerShell 스크립트
     tmp_dir = Path(tempfile.gettempdir()) / f"jump_update_{os.getpid()}"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     script_path = tmp_dir / "update.ps1"
-    log_dir = Path(os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))) / "jump_worker_dashboard"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "update.log"
+    _pylog(f"tmp_dir={tmp_dir}")
+    _pylog(f"log_path={log_path}")
 
     # 인스톨러는 {autopf}\GUARDIAN 에 설치됨 (.iss 의 DefaultDirName)
     # 64-bit Windows: C:\Program Files\GUARDIAN
@@ -282,6 +307,13 @@ Write-Host "=== Update done: $(Get-Date) ==="
 Stop-Transcript
 """
     script_path.write_text(ps_script, encoding="utf-8")
+    _pylog(f"Wrote PowerShell script: {script_path} ({script_path.stat().st_size} bytes)")
+
+    # 진단용: .ps1 사본을 로그 디렉토리에도 저장 (tmp_dir은 PowerShell이 지우므로)
+    try:
+        shutil.copy2(script_path, log_dir / "update.ps1")
+    except Exception as exc:
+        _pylog(f"Warning: failed to copy ps1 to log_dir: {exc}")
 
     # DETACHED_PROCESS = 0x00000008, CREATE_NEW_PROCESS_GROUP = 0x00000200
     creationflags = 0
@@ -290,18 +322,29 @@ Stop-Transcript
     if hasattr(subprocess, "CREATE_NO_WINDOW"):
         creationflags |= subprocess.CREATE_NO_WINDOW
 
-    subprocess.Popen(
-        [
-            "powershell.exe",
-            "-NoProfile",
-            "-ExecutionPolicy", "Bypass",
-            "-WindowStyle", "Hidden",
-            "-File", str(script_path),
-        ],
-        creationflags=creationflags,
-        close_fds=True,
-    )
+    try:
+        proc = subprocess.Popen(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-WindowStyle", "Hidden",
+                "-File", str(script_path),
+            ],
+            creationflags=creationflags,
+            close_fds=True,
+        )
+        _pylog(f"PowerShell launched: PID={proc.pid}")
+    except FileNotFoundError as exc:
+        _pylog(f"FATAL: powershell.exe not found: {exc}")
+        raise UpdateError(
+            "PowerShell을 찾을 수 없습니다. Windows PowerShell이 활성화되어 있는지 확인하세요."
+        ) from exc
+    except Exception as exc:
+        _pylog(f"FATAL: PowerShell launch failed: {type(exc).__name__}: {exc}")
+        raise UpdateError(f"업데이트 헬퍼 실행 실패: {exc}") from exc
 
+    _pylog("install_and_restart_windows: exiting parent process (os._exit)")
     # 현재 앱 종료 — PowerShell 헬퍼가 모든 후속 작업 처리
     os._exit(0)
 

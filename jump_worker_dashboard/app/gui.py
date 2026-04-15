@@ -125,6 +125,66 @@ SETTING_PENDING_UPDATE_VERSION = "pending_update_version"
 SETTING_PENDING_UPDATE_NOTES = "pending_update_notes"
 
 
+def _sanitize_release_notes(raw: str) -> str:
+    """업데이트 완료 다이얼로그용 노트 정제.
+
+    - 개발자 서명 (Co-Authored-By 등) 제거
+    - 관리자/내부 기술 정보 제거 (heartbeat, D1, R2, CI 등)
+    - 주요 기능 섹션만 우선 표시
+    """
+    if not raw:
+        return ""
+
+    # 제거할 라인 패턴 (하나라도 매치되면 해당 라인 drop)
+    DROP_PATTERNS = (
+        "co-authored-by",
+        "generated with",
+        "claude code",
+        "🤖",
+        "노트:",
+        "ci/cd",
+        "ci ",
+        "heartbeat",
+        "d1 테이블",
+        "r2 버킷",
+        "r2 프록시",
+        "cf access",
+        "cloudflare",
+        "workflow",
+        "nuitka",
+        "pyinstaller",
+        "inno setup",
+        "관리자 통합",
+        "관리자 모니터링",
+        "ip/디바이스 추적",
+        "라이센스 바인딩",
+        "sha256",
+    )
+
+    lines_out: list[str] = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        lower = stripped.lower()
+        # 개발자 전용 내용 필터
+        if any(p in lower for p in DROP_PATTERNS):
+            continue
+        lines_out.append(line)
+
+    # 연속된 빈 줄 축소
+    result: list[str] = []
+    prev_blank = False
+    for ln in lines_out:
+        if ln.strip() == "":
+            if prev_blank:
+                continue
+            prev_blank = True
+        else:
+            prev_blank = False
+        result.append(ln)
+
+    return "\n".join(result).strip()
+
+
 # ---------------------------
 # Font Loading
 # ---------------------------
@@ -977,9 +1037,12 @@ class WorkerDashboardApp(ctk.CTk):
             except Exception:
                 pass
 
+            # notes에서 개발자 서명/내부 기술 정보 제거
+            cleaned_notes = _sanitize_release_notes(pending_notes)
+
             msg = (
                 f"🎉 v{APP_VERSION} 업데이트 완료\n\n"
-                f"{pending_notes if pending_notes else '(업데이트 내용 정보 없음)'}\n\n"
+                f"{cleaned_notes if cleaned_notes else '최신 버전으로 업데이트되었습니다.'}\n\n"
                 f"불편 사항이 있으면 관리자에게 문의해주세요."
             )
             try:
