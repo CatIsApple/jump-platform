@@ -896,7 +896,31 @@ class WorkerDashboardApp(ctk.CTk):
 
         self.db.set_setting(SETTING_BACKEND_BASE_URL, HARDCODED_BACKEND_URL)
         license_key = self.db.get_setting(SETTING_BACKEND_LICENSE_KEY, "").strip()
-        if license_key:
+        saved_token = self.db.get_setting(SETTING_BACKEND_TOKEN, "").strip()
+
+        if license_key and saved_token:
+            # 저장된 토큰이 있으면 heartbeat으로 유효성 검증 먼저 시도.
+            # 재로그인하면 동일 디바이스의 기존 세션이 폐기되므로,
+            # 불필요한 세션 churn + 다른 인스턴스 강제 로그아웃을 방지.
+            client = self._backend_client()
+            if client:
+                try:
+                    client.heartbeat(saved_token)
+                    authenticated = True
+                    self.log_bus.emit("[라이센스] 기존 세션 유효 — 재사용", "INFO")
+                except Exception:
+                    # 토큰 만료/폐기 — 재로그인 필요
+                    self.log_bus.emit("[라이센스] 기존 세션 만료 — 재로그인 시도", "INFO")
+                    ok, msg = self._backend_login(notify=False)
+                    if ok:
+                        authenticated = True
+                    else:
+                        self.log_bus.emit(f"백엔드 로그인 실패: {msg}", "WARNING")
+            if authenticated:
+                ok_sync, msg_sync = self._sync_platform_domains_from_backend(notify=False)
+                if not ok_sync:
+                    self.log_bus.emit(msg_sync, "WARNING")
+        elif license_key:
             ok, msg = self._backend_login(notify=False)
             if ok:
                 authenticated = True
