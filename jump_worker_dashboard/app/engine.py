@@ -252,9 +252,15 @@ class WorkerEngine:
 
             if was_sleeping:
                 self.log_bus.emit(
-                    f"[heartbeat] 절전 복귀 감지 ({int(elapsed)}초 경과) — 세션 재확인",
+                    f"[heartbeat] 절전 복귀 감지 ({int(elapsed)}초 경과) — 즉시 재인증 시도",
                     "INFO",
                 )
+                # 절전 후에는 세션이 stale일 확률 높음 → 즉시 재로그인 시도
+                if self._try_silent_relogin(base_url):
+                    auth_fail_count = 0
+                    reconnect_attempted = False
+                    last_beat_time = time.monotonic()
+                    continue  # 새 토큰으로 즉시 heartbeat
 
             try:
                 client = WorkerBackendClient(BackendConfig(base_url=base_url))
@@ -294,13 +300,13 @@ class WorkerEngine:
                         self._stop_event.set()
                         return
                 else:
-                    # 네트워크/서버 오류 → 인증 문제 아님
-                    auth_fail_count = 0
-                    reconnect_attempted = False
+                    # 네트워크/서버 오류 (500 등) → 인증 문제가 아니므로 카운터 증가 안 함
+                    # 주의: 카운터를 0으로 리셋하면 안 됨 — 진짜 폐기된 세션이
+                    # 간헐적 네트워크 오류와 교대로 발생 시 임계치 도달 불가
+                    pass
             except Exception:
-                # 네트워크 에러 → 인증 문제 아님
-                auth_fail_count = 0
-                reconnect_attempted = False
+                # 네트워크 연결 에러 (timeout, DNS 등) → 카운터 유지 (증가도 리셋도 안 함)
+                pass
 
     def _enqueue(self, item: WorkItem) -> None:
         with self._queue_lock:

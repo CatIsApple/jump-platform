@@ -1278,21 +1278,13 @@ class WorkerDashboardApp(ctk.CTk):
         except Exception:
             pass
 
-        # 2. 엔진 중지 (stop_event set)
+        # 2. 엔진 중지 (stop_event set + 브라우저 종료 포함)
         try:
             self.engine.stop()
         except Exception as exc:
             self.log_bus.emit(f"엔진 중지 중 오류: {exc}", "WARNING")
 
-        # 3. 브라우저 강제 종료 (Selenium 작업 즉시 차단)
-        try:
-            if self.engine._browser is not None:
-                self.engine._browser.quit()
-                self.engine._browser = None
-        except Exception:
-            pass
-
-        # 4. UI 상태 갱신
+        # 3. UI 상태 갱신
         self._update_engine_buttons("stopped")
 
         # 5. 세션 + 라이센스 키 모두 제거 (자동 재로그인 차단)
