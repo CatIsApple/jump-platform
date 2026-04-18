@@ -8,6 +8,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from .backend_client import BackendConfig, BackendError, WorkerBackendClient, normalize_base_url
+
+SETTING_BACKEND_LICENSE_KEY = "backend_license_key"
+SETTING_BACKEND_DEVICE_ID = "backend_device_id"
 from .browser import BrowserManager
 from .db import Database
 from .exceptions import UserInterventionRequired
@@ -19,6 +22,8 @@ from .platform_domains import is_platform_enabled
 SETTING_BACKEND_BASE_URL = "backend_base_url"
 SETTING_BACKEND_TOKEN = "backend_token"
 HEARTBEAT_INTERVAL = 30  # seconds
+HEARTBEAT_AUTH_FAIL_THRESHOLD = 5  # 연속 인증 실패 N회 이상이면 세션 폐기 처리 (N × 30초 = 2분 30초 유예)
+HEARTBEAT_RECONNECT_AFTER = 2  # 연속 N회 실패 시 자동 재로그인 시도
 
 
 @dataclass(frozen=True)
@@ -181,8 +186,50 @@ class WorkerEngine:
             self.log_bus.emit("엔진이 중지 상태입니다. 시작하면 대기열 작업이 실행됩니다.", "WARNING")
         self.log_bus.emit(f"수동 실행 대기열 추가 (id={workflow_id})", "INFO")
 
+    def _try_silent_relogin(self, base_url: str) -> bool:
+        """저장된 라이센스 키로 자동 재로그인 시도.
+
+        성공하면 새 토큰이 DB에 저장되어 이후 heartbeat이 정상 동작.
+        실패하면 False 반환 (진짜 세션 폐기일 가능성 높음).
+        """
+        license_key = self.db.get_setting(SETTING_BACKEND_LICENSE_KEY, "").strip()
+        device_id = self.db.get_setting(SETTING_BACKEND_DEVICE_ID, "").strip()
+        if not license_key:
+            return False
+
+        try:
+            client = WorkerBackendClient(BackendConfig(base_url=base_url))
+            data = client.login(license_key=license_key, device_id=device_id)
+            new_token = str(data.get("token") or "").strip()
+            if new_token:
+                self.db.set_setting(SETTING_BACKEND_TOKEN, new_token)
+                self.log_bus.emit("[heartbeat] 자동 재로그인 성공 — 세션 복구됨", "INFO")
+                return True
+        except BackendError as exc:
+            if exc.status_code in (401, 403):
+                # 라이센스 자체가 무효 → 진짜 폐기
+                self.log_bus.emit(f"[heartbeat] 재로그인 실패 (라이센스 무효): {exc}", "ERROR")
+                return False
+            # 네트워크 오류 → 재시도 가치 있음
+            self.log_bus.emit(f"[heartbeat] 재로그인 네트워크 오류 (재시도 예정): {exc}", "WARNING")
+        except Exception as exc:
+            self.log_bus.emit(f"[heartbeat] 재로그인 예외: {exc}", "WARNING")
+
+        return False
+
     def _heartbeat_loop(self) -> None:
-        """30초마다 서버에 세션 유효성을 확인한다. 폐기 시 엔진을 중지한다."""
+        """30초마다 서버에 세션 유효성을 확인한다.
+
+        안정성 정책:
+          1. 단발 실패는 무시하고 재시도 (네트워크 순단, CF 챌린지, Windows 절전 복귀)
+          2. 연속 HEARTBEAT_RECONNECT_AFTER 회 실패 시 자동 재로그인 시도 (세션 자동 복구)
+          3. 재로그인도 실패하고 총 HEARTBEAT_AUTH_FAIL_THRESHOLD 회 연속 실패 시에만 세션 폐기
+          4. Windows 절전/hibernate 후 긴 공백 감지 → 즉시 재인증 시도
+        """
+        auth_fail_count = 0
+        last_beat_time = time.monotonic()
+        reconnect_attempted = False
+
         while not self._stop_event.is_set():
             # 30초 대기 (1초 단위로 stop 체크)
             for _ in range(HEARTBEAT_INTERVAL):
@@ -190,28 +237,70 @@ class WorkerEngine:
                     return
                 time.sleep(1.0)
 
+            # Windows 절전/hibernate 감지:
+            # 정상이면 ~30초 경과, 60초 이상이면 PC가 잠들었다 깨어난 것
+            now = time.monotonic()
+            elapsed = now - last_beat_time
+            last_beat_time = now
+
+            was_sleeping = elapsed > 90  # 90초 이상 → 절전 복귀 추정
+
             base_url = normalize_base_url(self.db.get_setting(SETTING_BACKEND_BASE_URL, ""))
             token = self.db.get_setting(SETTING_BACKEND_TOKEN, "").strip()
             if not base_url or not token:
                 continue
 
+            if was_sleeping:
+                self.log_bus.emit(
+                    f"[heartbeat] 절전 복귀 감지 ({int(elapsed)}초 경과) — 세션 재확인",
+                    "INFO",
+                )
+
             try:
                 client = WorkerBackendClient(BackendConfig(base_url=base_url))
                 client.heartbeat(token)
+                # 성공 → 카운터 초기화
+                if auth_fail_count > 0:
+                    self.log_bus.emit(
+                        f"[heartbeat] 서버 연결 복구 (이전 {auth_fail_count}회 실패 후)",
+                        "INFO",
+                    )
+                auth_fail_count = 0
+                reconnect_attempted = False
             except BackendError as exc:
                 if exc.status_code in (401, 403):
+                    auth_fail_count += 1
                     self.log_bus.emit(
-                        f"세션이 서버에서 폐기되었습니다: {exc}",
-                        "ERROR",
+                        f"[heartbeat] 인증 실패 ({auth_fail_count}/{HEARTBEAT_AUTH_FAIL_THRESHOLD}): {exc}",
+                        "WARNING",
                     )
-                    # 세션 폐기 이벤트 → GUI가 로그아웃 처리
-                    if self._on_session_revoked is not None:
-                        self._on_session_revoked.set()
-                    self._stop_event.set()
-                    return
-                # 네트워크 오류 등은 무시하고 다음 주기에 재시도
+
+                    # 자동 재로그인 시도 (임계치 도달 시, 1회만)
+                    if auth_fail_count >= HEARTBEAT_RECONNECT_AFTER and not reconnect_attempted:
+                        reconnect_attempted = True
+                        if self._try_silent_relogin(base_url):
+                            auth_fail_count = 0
+                            reconnect_attempted = False
+                            continue  # 새 토큰으로 즉시 다음 heartbeat
+
+                    # 최종 임계치 초과 → 세션 폐기 확정
+                    if auth_fail_count >= HEARTBEAT_AUTH_FAIL_THRESHOLD:
+                        self.log_bus.emit(
+                            f"세션이 서버에서 폐기되었습니다 (연속 {auth_fail_count}회 인증 실패 + 재로그인 실패)",
+                            "ERROR",
+                        )
+                        if self._on_session_revoked is not None:
+                            self._on_session_revoked.set()
+                        self._stop_event.set()
+                        return
+                else:
+                    # 네트워크/서버 오류 → 인증 문제 아님
+                    auth_fail_count = 0
+                    reconnect_attempted = False
             except Exception:
-                pass
+                # 네트워크 에러 → 인증 문제 아님
+                auth_fail_count = 0
+                reconnect_attempted = False
 
     def _enqueue(self, item: WorkItem) -> None:
         with self._queue_lock:
